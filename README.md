@@ -49,7 +49,7 @@ Keys: s = save composite, q/Esc = quit
 
 ## Test 3: Hue rotation (色彩空間轉換) live demo
 ```bash
-Keys: ←/→ = ±10 hue, ↑/↓ = ±1 hue, 0 = reset, s = save, q/Esc = quit
+python3 scripts/test_hue_rotation_qt.py
 ```
 Keys: ←/→ = ±10 hue, ↑/↓ = ±1 hue, 0 = reset, s = save, q/Esc = quit
 
