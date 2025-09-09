@@ -19,6 +19,13 @@ bash install.sh
 ## Quick Camera Check
 for Bookworm ```rpicam-hello -t 0```
 for Bullseye (older version): ```libcamera-hello -t 0```
+if there is any detection error:
+1.	```sudo apt update```
+2.	```sudo apt install -y rpicam-apps```
+3.	```sudo apt full-upgrade -y```
+4.	```rpicam-hello --list-cameras```
+
+
 
 # Run the tests
 ```bash
