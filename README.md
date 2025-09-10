@@ -32,24 +32,24 @@ if there is any detection error:
 git clone https://github.com/<your-user>/<your-repo>.git
 cd <your-repo>
 bash install.sh
-python3 scripts/test_res_fps_qt.py   # or the other tests
+python3 test_res_fps_qt.py   # or the other tests
 ```
 
 ## Test 1: Resolution/FPS live preview
 ```bash
-python3 scripts/test_res_fps_qt.py
+python3 test_res_fps_qt.py
 ```
 Keys: r = next resolution, f = next FPS, s = save frame, q/Esc = quit
 
 ## Test 2: RGB + HSV channels live viewer
 ```bash
-python3 scripts/test_hsv_channels_qt.py
+python3 test_hsv_channels_qt.py
 ```
 Keys: s = save composite, q/Esc = quit
 
 ## Test 3: Hue rotation (色彩空間轉換) live demo
 ```bash
-python3 scripts/test_hue_rotation_qt.py
+python3 test_hue_rotation_qt.py
 ```
 Keys: ←/→ = ±10 hue, ↑/↓ = ±1 hue, 0 = reset, s = save, q/Esc = quit
 
