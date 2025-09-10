@@ -96,7 +96,7 @@ Print what the camera “sees” as numbers: mean color, dominant hue, brightnes
 ```bash
 python3 camera_inspector.py --preview
 ```
-Default resolution=1280x720, fps=30, interval=1.0.
+Default SIZE=1280x720, FPS=30, PRINT_RATE=1.0.
 You may change the setting of resolution(, fps and print rate:
 ```bash
 camera_inspector.py [--size SIZE] [--fps FPS] [--print-rate PRINT_RATE] --preview
