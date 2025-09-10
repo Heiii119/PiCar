@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # line_follower_console.py
-import argparse, time, math
+import argparse, time, math, sys, select
 import numpy as np
 from PIL import Image
 from picamera2 import Picamera2
@@ -30,17 +30,14 @@ def rgb_to_hsv_np(rgb):
     return np.array(H, dtype=np.uint8), np.array(S, dtype=np.uint8), np.array(V, dtype=np.uint8)
 
 def make_mask_black(H, S, V, s_max=80, v_max=80):
-    # Dark line on light floor
     return (V <= v_max) & (S <= s_max)
 
 def in_hue_range(H, h_lo_deg, h_hi_deg):
-    # H is 0..255 ~ 0..360 deg
     lo = int(round(h_lo_deg * 255.0 / 360.0)) % 256
     hi = int(round(h_hi_deg * 255.0 / 360.0)) % 256
     if lo <= hi:
         return (H >= lo) & (H <= hi)
     else:
-        # wrap-around
         return (H >= lo) | (H <= hi)
 
 def make_mask_color(H, S, V, h_lo=20, h_hi=40, s_min=60, v_min=60):
@@ -159,24 +156,83 @@ def main():
     preview = None
     if args.preview:
         preview = PreviewWindow(title="Line follower preview")
-        # Ensure it shows before other output/processing
         preview.app.processEvents()
         time.sleep(0.05)
 
-    # 2) Then configure and start the camera
+    # 2) Configure and start the camera
     W, H = map(int, args.size.lower().split("x"))
     picam2 = Picamera2()
     configure(picam2, (W, H), args.fps)
     picam2.start()
 
-    # 3) Now announce we’re running
-    print("Running. Ctrl+C to stop.")
+    # 3) Preview-only phase with non-blocking console prompt
+    #    The preview keeps updating while we wait for 'y'/'n'.
+    want_start = False
+    if args.preview:
+        print("Do you want to start line follower? (y/n): ", end="", flush=True)
+        try:
+            while True:
+                frame = picam2.capture_array()
+                # Draw overlays (ROI + centroid + angle), same as main loop but no console prints
+                y0 = int(H * (1.0 - args.roi_height))
+                roi = frame[y0:H, :, :]
+                hR, wR = roi.shape[0], roi.shape[1]
 
+                Hc, Sc, Vc = rgb_to_hsv_np(roi)
+                if args.mode == "black":
+                    mask = make_mask_black(Hc, Sc, Vc, s_max=args.s_max, v_max=args.v_max)
+                else:
+                    mask = make_mask_color(Hc, Sc, Vc, h_lo=args.h_lo, h_hi=args.h_hi, s_min=args.s_min, v_min=args.v_min)
+
+                coverage = mask.mean()
+                cx = cy = None
+                ang = None
+                if coverage >= args.min_coverage:
+                    cx, cy, _ = centroid_from_mask(mask)
+                    if cx is not None:
+                        ang = pca_angle_deg(mask)
+
+                if preview is not None:
+                    overlays = {
+                        "roi_y0": y0,
+                        "roi_y1": H,
+                        "cx": cx if coverage >= args.min_coverage else None,
+                        "cy": cy if coverage >= args.min_coverage else None,
+                        "angle": ang,
+                    }
+                    preview.draw_and_show(frame, overlays=overlays)
+
+                # Non-blocking read of user's response
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.0)
+                if rlist:
+                    ans = sys.stdin.readline().strip().lower()
+                    if ans.startswith("y"):
+                        want_start = True
+                        print("\nStarting line follower...")
+                        break
+                    elif ans.startswith("n"):
+                        print("\nExiting without starting.")
+                        return
+                    else:
+                        print("Please type y or n: ", end="", flush=True)
+        except KeyboardInterrupt:
+            return
+    else:
+        # If no preview requested, just ask once (blocking)
+        ans = input("Do you want to start line follower? (y/n): ").strip().lower()
+        if ans.startswith("y"):
+            want_start = True
+        else:
+            print("Exiting without starting.")
+            return
+
+    # 4) Now announce and start normal console output loop
+    print("Running. Ctrl+C to stop.")
     last_print = 0.0
     print_period = 1.0 / max(1e-3, args.print_rate)
 
     try:
-        while True:
+        while want_start:
             frame = picam2.capture_array()  # HxWx3 RGB888
             # Bottom ROI
             y0 = int(H * (1.0 - args.roi_height))
