@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
 # line_follower_console.py
+# Preview window opens first, then asks: "Do you want to start line follower? (y/n)"
+# Starts console output only after you type 'y'. Type 'n' to exit.
+
+import os
+
+# Choose a Qt platform before importing PyQt5 for more reliable preview startup.
+# Prefer X11 (xcb) if DISPLAY is present; otherwise try Wayland; else offscreen.
+if "QT_QPA_PLATFORM" not in os.environ:
+    if os.environ.get("DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    elif os.environ.get("WAYLAND_DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "wayland"
+    else:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 import argparse, time, math, sys, select
 import numpy as np
 from PIL import Image
@@ -30,14 +45,17 @@ def rgb_to_hsv_np(rgb):
     return np.array(H, dtype=np.uint8), np.array(S, dtype=np.uint8), np.array(V, dtype=np.uint8)
 
 def make_mask_black(H, S, V, s_max=80, v_max=80):
+    # Dark line on light floor
     return (V <= v_max) & (S <= s_max)
 
 def in_hue_range(H, h_lo_deg, h_hi_deg):
+    # H is 0..255 ~ 0..360 deg
     lo = int(round(h_lo_deg * 255.0 / 360.0)) % 256
     hi = int(round(h_hi_deg * 255.0 / 360.0)) % 256
     if lo <= hi:
         return (H >= lo) & (H <= hi)
     else:
+        # wrap-around
         return (H >= lo) | (H <= hi)
 
 def make_mask_color(H, S, V, h_lo=20, h_hi=40, s_min=60, v_min=60):
@@ -70,6 +88,9 @@ def pca_angle_deg(mask):
 # Lightweight PyQt5 preview helper
 class PreviewWindow:
     def __init__(self, title="Line follower preview"):
+        # Block preview if no GUI session
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            raise RuntimeError("No GUI session detected (QT_QPA_PLATFORM=offscreen). Run on the Pi desktop.")
         if QApplication is None:
             raise RuntimeError("PyQt5 is not available. Install python3-pyqt5 or run without --preview.")
         self.app = QApplication.instance() or QApplication([])
@@ -78,6 +99,10 @@ class PreviewWindow:
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumSize(640, 360)
         self.label.show()
+        # Bring to front and ensure it paints
+        self.label.raise_()
+        self.label.activateWindow()
+        self.app.processEvents()
 
     def draw_and_show(self, frame_rgb, overlays=None):
         h, w, _ = frame_rgb.shape
@@ -156,6 +181,7 @@ def main():
     preview = None
     if args.preview:
         preview = PreviewWindow(title="Line follower preview")
+        # Ensure it shows before other processing
         preview.app.processEvents()
         time.sleep(0.05)
 
