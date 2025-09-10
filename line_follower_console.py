@@ -17,23 +17,19 @@ def configure(picam2, size, fps):
     picam2.configure(cfg)
 
 def rgb_to_hsv_np(rgb):
-    # Use Pillow for correctness and simplicity
     img = Image.fromarray(rgb, "RGB").convert("HSV")
     H, S, V = img.split()
     return np.array(H, dtype=np.uint8), np.array(S, dtype=np.uint8), np.array(V, dtype=np.uint8)
 
 def make_mask_black(H, S, V, s_max=80, v_max=80):
-    # Dark line on light floor
     return (V <= v_max) & (S <= s_max)
 
 def in_hue_range(H, h_lo_deg, h_hi_deg):
-    # H is 0..255 ~ 0..360 deg
     lo = int(round(h_lo_deg * 255.0 / 360.0)) % 256
     hi = int(round(h_hi_deg * 255.0 / 360.0)) % 256
     if lo <= hi:
         return (H >= lo) & (H <= hi)
     else:
-        # wrap-around
         return (H >= lo) | (H <= hi)
 
 def make_mask_color(H, S, V, h_lo=20, h_hi=40, s_min=60, v_min=60):
@@ -43,10 +39,7 @@ def centroid_from_mask(mask):
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
         return None, None, 0
-    cx = xs.mean()
-    cy = ys.mean()
-    area = len(xs)
-    return cx, cy, area
+    return xs.mean(), ys.mean(), len(xs)
 
 def pca_angle_deg(mask):
     ys, xs = np.nonzero(mask)
@@ -57,12 +50,11 @@ def pca_angle_deg(mask):
     y = ys.astype(np.float32)
     x -= x.mean()
     y -= y.mean()
-    M = np.stack([x, y], axis=0)   # 2 x N
-    C = (M @ M.T) / n              # 2 x 2 covariance
-    w, V = np.linalg.eigh(C)       # ascending eigenvalues
-    v = V[:, 1]                    # principal direction
-    angle = math.degrees(math.atan2(v[1], v[0]))  # 0°=horizontal, 90°=vertical
-    # normalize to [-90, 90]
+    M = np.stack([x, y], axis=0)
+    C = (M @ M.T) / n
+    w, V = np.linalg.eigh(C)
+    v = V[:, 1]
+    angle = math.degrees(math.atan2(v[1], v[0]))
     if angle > 90: angle -= 180
     if angle < -90: angle += 180
     return angle
@@ -112,11 +104,10 @@ def main():
             else:
                 mask = make_mask_color(Hc, Sc, Vc, h_lo=args.h_lo, h_hi=args.h_hi, s_min=args.s_min, v_min=args.v_min)
 
-            coverage = mask.mean()  # fraction of ROI pixels
+            coverage = mask.mean()
             status = ""
             decision = ""
             e_val = None
-            angle = None
 
             if coverage < args.min_coverage:
                 status = "line lost"
@@ -127,29 +118,23 @@ def main():
                     status = "line lost"
                     decision = "search"
                 else:
-                    # Normalized lateral error: e = (cx - wR/2) / (wR/2)
                     e_val = float((cx - (wR/2)) / (wR/2))
-                    # Decision logic: steer towards the line to reduce |e|
                     if abs(e_val) <= args.deadband:
                         decision = "go straight"
                         status = "on line (centered)"
                     elif e_val < -args.deadband:
-                        # line appears LEFT of center
                         status = "line LEFT of center"
                         decision = "turn LEFT"
                     else:
                         status = "line RIGHT of center"
                         decision = "turn RIGHT"
 
-                    if args.invert-steer:  # noqa: E999 (hyphen in attribute)
-                        pass
-            # Workaround because argparse doesn't allow hyphen in attribute name
-            invert = getattr(args, "invert_steer", False)
+            # Optional steering inversion
+            invert = args.invert_steer
             if invert and ("turn LEFT" in decision or "turn RIGHT" in decision):
                 decision = "turn RIGHT" if "LEFT" in decision else "turn LEFT"
                 status = status.replace("LEFT","TEMP").replace("RIGHT","LEFT").replace("TEMP","RIGHT")
 
-            # Angle estimate (optional)
             angle = pca_angle_deg(mask)
             now = time.time()
             if now - last_print >= print_period:
@@ -158,7 +143,6 @@ def main():
                 if e_val is None:
                     print(f"ROI: {wR}x{hR} | coverage={cov_pct:.2f}% | {status} | decision={decision}")
                 else:
-                    # angle can be None
                     if angle is None:
                         print(f"ROI: {wR}x{hR} | coverage={cov_pct:.2f}% | e={e_val:+.3f} | {status} -> {decision}")
                     else:
