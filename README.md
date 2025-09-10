@@ -94,6 +94,10 @@ Print what the camera “sees” as numbers: mean color, dominant hue, brightnes
 
 ### Run:
 ```bash
+python3 camera_inspector.py --preview
+```
+
+```bash
 python3 camera_inspector.py --size 1280x720 --fps 30 --interval 1.0
 ```
 
