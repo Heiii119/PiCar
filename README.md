@@ -11,8 +11,8 @@ Live previews and color-space demos for Raspberry Pi cameras using Picamera2 + P
 
 ## Install
 ```bash
-git clone https://github.com/<your-user>/<your-repo>.git
-cd <your-repo>
+git clone git@github.com:Heiii119/PiCar.git
+cd PiCar
 bash install.sh
 ```
 
