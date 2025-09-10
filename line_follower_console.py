@@ -5,6 +5,14 @@ import numpy as np
 from PIL import Image
 from picamera2 import Picamera2
 
+# Optional PyQt5 preview (only used if --preview is set)
+try:
+    from PyQt5.QtWidgets import QApplication, QLabel
+    from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
+    from PyQt5.QtCore import Qt
+except Exception:
+    QApplication = None
+
 def fps_to_us(fps):
     fps = max(1, int(fps))
     return max(3333, int(1_000_000 / fps))
@@ -22,14 +30,17 @@ def rgb_to_hsv_np(rgb):
     return np.array(H, dtype=np.uint8), np.array(S, dtype=np.uint8), np.array(V, dtype=np.uint8)
 
 def make_mask_black(H, S, V, s_max=80, v_max=80):
+    # Dark line on light floor
     return (V <= v_max) & (S <= s_max)
 
 def in_hue_range(H, h_lo_deg, h_hi_deg):
+    # H is 0..255 ~ 0..360 deg
     lo = int(round(h_lo_deg * 255.0 / 360.0)) % 256
     hi = int(round(h_hi_deg * 255.0 / 360.0)) % 256
     if lo <= hi:
         return (H >= lo) & (H <= hi)
     else:
+        # wrap-around
         return (H >= lo) | (H <= hi)
 
 def make_mask_color(H, S, V, h_lo=20, h_hi=40, s_min=60, v_min=60):
@@ -54,17 +65,78 @@ def pca_angle_deg(mask):
     C = (M @ M.T) / n
     w, V = np.linalg.eigh(C)
     v = V[:, 1]
-    angle = math.degrees(math.atan2(v[1], v[0]))
+    angle = math.degrees(math.atan2(v[1], v[0]))  # 0°=horizontal, 90°=vertical
     if angle > 90: angle -= 180
     if angle < -90: angle += 180
     return angle
+
+# Lightweight PyQt5 preview helper
+class PreviewWindow:
+    def __init__(self, title="Line follower preview"):
+        if QApplication is None:
+            raise RuntimeError("PyQt5 is not available. Install python3-pyqt5 or run without --preview.")
+        self.app = QApplication.instance() or QApplication([])
+        self.label = QLabel()
+        self.label.setWindowTitle(title)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setMinimumSize(640, 360)
+        self.label.show()
+
+    def draw_and_show(self, frame_rgb, overlays=None):
+        h, w, _ = frame_rgb.shape
+        # Wrap numpy data in QImage, then copy so we can paint safely
+        qimg = QImage(frame_rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+
+        if overlays:
+            painter = QPainter(qimg)
+            pen = QPen(QColor("cyan"))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            # center vertical line
+            painter.drawLine(w // 2, 0, w // 2, h)
+
+            # ROI rectangle
+            y0 = overlays.get("roi_y0", 0)
+            y1 = overlays.get("roi_y1", h)
+            pen.setColor(QColor("lime"))
+            painter.setPen(pen)
+            painter.drawRect(0, y0, w - 1, y1 - y0 - 1)
+
+            # centroid dot
+            cx = overlays.get("cx")
+            cy = overlays.get("cy")
+            if cx is not None and cy is not None:
+                pen.setColor(QColor("red"))
+                painter.setPen(pen)
+                r = 6
+                painter.drawEllipse(int(cx) - r, int(y0 + cy) - r, 2 * r, 2 * r)
+
+            # angle segment
+            ang = overlays.get("angle")
+            if ang is not None and cx is not None and cy is not None:
+                length = min(w, h) // 8
+                rad = math.radians(ang)
+                x0 = int(cx - length * math.cos(rad) / 2)
+                y0_line = int(y0 + cy - length * math.sin(rad) / 2)
+                x1 = int(cx + length * math.cos(rad) / 2)
+                y1_line = int(y0 + cy + length * math.sin(rad) / 2)
+                pen.setColor(QColor("yellow"))
+                pen.setWidth(3)
+                painter.setPen(pen)
+                painter.drawLine(x0, y0_line, x1, y1_line)
+
+            painter.end()
+
+        self.label.setPixmap(QPixmap.fromImage(qimg))
+        # Keep UI responsive without blocking the script
+        self.app.processEvents()
 
 def main():
     ap = argparse.ArgumentParser(description="Line-following console analyzer (no OpenCV)")
     ap.add_argument("--size", default="1280x720", help="Resolution WxH (e.g. 1280x720)")
     ap.add_argument("--fps", type=int, default=30, help="Target FPS")
     ap.add_argument("--roi-height", type=float, default=0.35, help="Bottom ROI height fraction (0..1)")
-    ap.add_argument("--mode", choices=["black","color"], default="black", help="Detect dark line or a colored line")
+    ap.add_argument("--mode", choices=["black", "color"], default="black", help="Detect dark line or a colored line")
     # thresholds for black mode
     ap.add_argument("--v-max", type=int, default=80, help="Max V for black line")
     ap.add_argument("--s-max", type=int, default=100, help="Max S for black line")
@@ -78,6 +150,7 @@ def main():
     ap.add_argument("--min-coverage", type=float, default=0.002, help="Min mask fraction to accept line (~0.2%)")
     ap.add_argument("--invert-steer", action="store_true", help="Invert left/right decision if camera mount is mirrored")
     ap.add_argument("--print-rate", type=float, default=10.0, help="Status lines per second")
+    ap.add_argument("--preview", action="store_true", help="Show live camera preview with overlays (PyQt5)")
     args = ap.parse_args()
 
     W, H = map(int, args.size.lower().split("x"))
@@ -85,6 +158,10 @@ def main():
     configure(picam2, (W, H), args.fps)
     picam2.start()
     print("Running. Ctrl+C to stop.")
+
+    preview = None
+    if args.preview:
+        preview = PreviewWindow(title="Line follower preview")
 
     last_print = 0.0
     print_period = 1.0 / max(1e-3, args.print_rate)
@@ -112,13 +189,16 @@ def main():
             if coverage < args.min_coverage:
                 status = "line lost"
                 decision = "search"
+                ang = None
+                cx = cy = None
             else:
                 cx, cy, _ = centroid_from_mask(mask)
                 if cx is None:
                     status = "line lost"
                     decision = "search"
+                    ang = None
                 else:
-                    e_val = float((cx - (wR/2)) / (wR/2))
+                    e_val = float((cx - (wR / 2)) / (wR / 2))
                     if abs(e_val) <= args.deadband:
                         decision = "go straight"
                         status = "on line (centered)"
@@ -128,14 +208,26 @@ def main():
                     else:
                         status = "line RIGHT of center"
                         decision = "turn RIGHT"
+                    ang = pca_angle_deg(mask)
 
             # Optional steering inversion
             invert = args.invert_steer
             if invert and ("turn LEFT" in decision or "turn RIGHT" in decision):
                 decision = "turn RIGHT" if "LEFT" in decision else "turn LEFT"
-                status = status.replace("LEFT","TEMP").replace("RIGHT","LEFT").replace("TEMP","RIGHT")
+                status = status.replace("LEFT", "TEMP").replace("RIGHT", "LEFT").replace("TEMP", "RIGHT")
 
-            angle = pca_angle_deg(mask)
+            # Update preview (if enabled)
+            if preview is not None:
+                overlays = {
+                    "roi_y0": y0,
+                    "roi_y1": H,
+                    "cx": cx if coverage >= args.min_coverage else None,
+                    "cy": cy if coverage >= args.min_coverage else None,
+                    "angle": ang,
+                }
+                preview.draw_and_show(frame, overlays=overlays)
+
+            # Console output at chosen rate
             now = time.time()
             if now - last_print >= print_period:
                 last_print = now
@@ -143,10 +235,11 @@ def main():
                 if e_val is None:
                     print(f"ROI: {wR}x{hR} | coverage={cov_pct:.2f}% | {status} | decision={decision}")
                 else:
-                    if angle is None:
+                    if ang is None:
                         print(f"ROI: {wR}x{hR} | coverage={cov_pct:.2f}% | e={e_val:+.3f} | {status} -> {decision}")
                     else:
-                        print(f"ROI: {wR}x{hR} | coverage={cov_pct:.2f}% | e={e_val:+.3f} | angle={angle:+.1f}° | {status} -> {decision}")
+                        print(f"ROI: {wR}x{hR} | coverage={cov_pct:.2f}% | e={e_val:+.3f} | angle={ang:+.1f}° | {status} -> {decision}")
+
     except KeyboardInterrupt:
         pass
     finally:
