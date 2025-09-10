@@ -89,10 +89,11 @@ class PreviewWindow:
 
         if overlays:
             painter = QPainter(qimg)
+
+            # center vertical line
             pen = QPen(QColor("cyan"))
             pen.setWidth(2)
             painter.setPen(pen)
-            # center vertical line
             painter.drawLine(w // 2, 0, w // 2, h)
 
             # ROI rectangle
@@ -102,11 +103,12 @@ class PreviewWindow:
             painter.setPen(pen)
             painter.drawRect(0, y0, w - 1, y1 - y0 - 1)
 
-            # centroid dot
+            # centroid dot (cx, cy are ROI-local; add y0)
             cx = overlays.get("cx")
             cy = overlays.get("cy")
             if cx is not None and cy is not None:
                 pen.setColor(QColor("red"))
+                pen.setWidth(2)
                 painter.setPen(pen)
                 r = 6
                 painter.drawEllipse(int(cx) - r, int(y0 + cy) - r, 2 * r, 2 * r)
@@ -153,15 +155,22 @@ def main():
     ap.add_argument("--preview", action="store_true", help="Show live camera preview with overlays (PyQt5)")
     args = ap.parse_args()
 
+    # 1) Create the preview window FIRST (if requested)
+    preview = None
+    if args.preview:
+        preview = PreviewWindow(title="Line follower preview")
+        # Ensure it shows before other output/processing
+        preview.app.processEvents()
+        time.sleep(0.05)
+
+    # 2) Then configure and start the camera
     W, H = map(int, args.size.lower().split("x"))
     picam2 = Picamera2()
     configure(picam2, (W, H), args.fps)
     picam2.start()
-    print("Running. Ctrl+C to stop.")
 
-    preview = None
-    if args.preview:
-        preview = PreviewWindow(title="Line follower preview")
+    # 3) Now announce we’re running
+    print("Running. Ctrl+C to stop.")
 
     last_print = 0.0
     print_period = 1.0 / max(1e-3, args.print_rate)
@@ -185,19 +194,19 @@ def main():
             status = ""
             decision = ""
             e_val = None
+            cx = cy = None
+            ang = None
 
             if coverage < args.min_coverage:
                 status = "line lost"
                 decision = "search"
-                ang = None
-                cx = cy = None
             else:
                 cx, cy, _ = centroid_from_mask(mask)
                 if cx is None:
                     status = "line lost"
                     decision = "search"
-                    ang = None
                 else:
+                    # Normalized lateral error: e = (cx - wR/2) / (wR/2)
                     e_val = float((cx - (wR / 2)) / (wR / 2))
                     if abs(e_val) <= args.deadband:
                         decision = "go straight"
