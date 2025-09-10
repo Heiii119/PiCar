@@ -98,12 +98,12 @@ python3 camera_inspector.py --size 1280x720 --fps 30 --interval 1.0
 ```
 
 ### Console/Output (prints every interval):
-Mean RGB: (R,G,B) for each ROI
-Mean HSV: H in degrees, S and V in 0–255 scale
-Dominant hue: mode of hue histogram on sufficiently saturated pixels
-V_p50: median brightness
-Edge strength: average gradient magnitude
-Orientation tendency: “vertical-dominant”, “horizontal-dominant”, or “mixed” with dx/dy ratio
+- Mean RGB: (R,G,B) for each ROI
+- Mean HSV: H in degrees, S and V in 0–255 scale
+- Dominant hue: mode of hue histogram on sufficiently saturated pixels
+- V_p50: median brightness
+- Edge strength: average gradient magnitude
+- Orientation tendency: “vertical-dominant”, “horizontal-dominant”, or “mixed” with dx/dy ratio
 
 ## Task 5: Line detection and steering decision (console)
 ### Purpose: 
