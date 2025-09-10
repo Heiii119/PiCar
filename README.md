@@ -110,6 +110,10 @@ python3 camera_inspector.py --size 1280x720 --fps 30 --interval 1.0
 For a line-following task. Looks at the bottom ROI, detects a line (black or colored), and prints position/steering decisions like “line LEFT of center → turn LEFT”.
 
 ### Run:
+```bash
+python3 line_follower_console.py --preview
+```
+
 For Black Line on Bright Floor:
 ```bash
 python3 line_follower_console.py --mode black --v-max 80 --s-max 100
