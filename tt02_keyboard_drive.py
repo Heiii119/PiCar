@@ -135,9 +135,9 @@ def start_preview():
                 backend = "QT" 
                 picam2.start() 
                 return f"started ({backend})" 
-            except Exception as e: 
-                return f"error: {e}" 
-                return "unknown"
+        except Exception as e: 
+            return f"error: {e}" 
+            return "unknown"
 
 def stop_preview(): 
     global picam2 
