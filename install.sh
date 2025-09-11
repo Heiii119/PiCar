@@ -13,5 +13,5 @@ sudo apt update
 sudo apt install -y python3-picamera2 python3-pyqt5 python3-pil python3-numpy
 
 echo
-echo "Install done. Test the camera with: rpicam-hello -t 2000"
-echo "Then run scripts, e.g.: python3 scripts/test_res_fps_qt.py"
+echo "Install done. Test the camera with: rpicam-hello -t 0"
+echo "Then run scripts, e.g.: python3 test_res_fps_qt.py"
