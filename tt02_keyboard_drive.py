@@ -23,6 +23,14 @@ import signal
 import sys
 
 # ==========================
+# Optional camera preview
+# ==========================
+try: 
+    from picamera2 import Picamera2, Preview 
+except Exception: 
+    Picamera2 = None 
+    Preview = None
+# ==========================
 # User-provided constants
 # ==========================
 PCA9685_I2C_ADDR   = 0x40
@@ -30,12 +38,12 @@ PCA9685_I2C_BUSNUM = None  # None = default I2C bus (usually 1 on Pi)
 
 # STEERING
 STEERING_CHANNEL     = 1
-STEERING_LEFT_PWM    = 460
-STEERING_RIGHT_PWM   = 290
+STEERING_LEFT_PWM    = 500
+STEERING_RIGHT_PWM   = 240
 
 # THROTTLE
 THROTTLE_CHANNEL       = 0
-THROTTLE_FORWARD_PWM   = 500
+THROTTLE_FORWARD_PWM   = 480
 THROTTLE_STOPPED_PWM   = 370
 THROTTLE_REVERSE_PWM   = 220
 
