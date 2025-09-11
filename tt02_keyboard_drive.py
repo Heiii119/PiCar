@@ -120,9 +120,7 @@ def neutral_all(pwm: PCA9685Driver):
 # Camera preview helper 
 # ==========================
 picam2 = None
-
 def start_preview(): 
-    print("Attempt to start Picamera2 preview; return a status string.")
     global picam2 
     if Picamera2 is None or Preview is None: 
         return "unavailable (Picamera2 not installed)" 
@@ -131,14 +129,15 @@ def start_preview():
             picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) 
             try: 
                 picam2.start_preview(Preview.QTGL) 
-                backend = "QTGL"
+                backend = "QTGL" 
             except Exception: 
                 picam2.start_preview(Preview.QT) 
-                backend = "QT"
+                backend = "QT" 
                 picam2.start() 
-            return f"started ({backend})" 
-        except Exception as e: 
-            return f"error: {e}"
+                return f"started ({backend})" 
+            except Exception as e: 
+                return f"error: {e}" 
+                return "unknown"
 
 def stop_preview(): 
     global picam2 
@@ -159,6 +158,9 @@ def run(stdscr):
     stdscr.keypad(True)
     stdscr.nodelay(True)
     curses.curs_set(0)
+    
+    # Start camera preview 
+    preview_status = start_preview() 
 
     # Init PCA9685
     pwm = PCA9685Driver(address=PCA9685_I2C_ADDR, busnum=PCA9685_I2C_BUSNUM, frequency=PCA9685_FREQUENCY)
@@ -167,15 +169,13 @@ def run(stdscr):
     # Ensure safe neutral at start (arm ESC)
     neutral_all(pwm)
     time.sleep(1.0)
-
-    # Start camera preview 
-    preview_status = start_preview() 
     
     # State
     last_press = {'up': 0.0, 'down': 0.0, 'left': 0.0, 'right': 0.0}
     last_steer = steering_center_pwm() 
     last_throttle = THROTTLE_STOPPED_PWM
     last_help_refresh = 0.0
+
 
     # Draw static help
     def draw_help():
@@ -185,7 +185,7 @@ def run(stdscr):
         stdscr.addstr(2, 2, "↑ Up: forward    | ↓ Down: reverse")
         stdscr.addstr(3, 2, "← Left: steer L  | → Right: steer R")
         stdscr.addstr(4, 2, "Space: STOP throttle,  c: center steering,  q: quit")
-        stdscr.addstr(5, 0, f"Camera preview: {preview_status}")
+        stdscr.addstr(5, 0, f"Camera preview: {preview_status} | now: {'running' if picam2 else 'not running'} ")
         stdscr.addstr(6, 0, "Status:")
         stdscr.refresh()
 
