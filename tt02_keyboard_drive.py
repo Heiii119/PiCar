@@ -21,15 +21,11 @@ import time
 import curses
 import signal
 import sys
+import os
+from datetime import datetime
+from PyQt5 import QtCore, QtGui, QtWidgets
+from picamera2 import Picamera2
 
-# ==========================
-# Optional camera preview
-# ==========================
-try: 
-    from picamera2 import Picamera2, Preview 
-except Exception: 
-    Picamera2 = None 
-    Preview = None
 # ==========================
 # User-provided constants
 # ==========================
