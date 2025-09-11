@@ -122,7 +122,7 @@ def neutral_all(pwm: PCA9685Driver):
 picam2 = None
 
 def start_preview(): 
-    print("""Start Picamera2 preview; returns a short status string.""")
+    print("Attempt to start Picamera2 preview; return a status string.")
     global picam2 
     if Picamera2 is None or Preview is None: 
         return "unavailable (Picamera2 not installed)" 
@@ -131,10 +131,12 @@ def start_preview():
             picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) 
             try: 
                 picam2.start_preview(Preview.QTGL) 
+                backend = "QTGL"
             except Exception: 
                 picam2.start_preview(Preview.QT) 
+                backend = "QT"
                 picam2.start() 
-            return "started" 
+            return f"started ({backend})" 
         except Exception as e: 
             return f"error: {e}"
 
@@ -171,8 +173,8 @@ def run(stdscr):
     
     # State
     last_press = {'up': 0.0, 'down': 0.0, 'left': 0.0, 'right': 0.0}
-    last_steer = None
-    last_throttle = None
+    last_steer = steering_center_pwm() 
+    last_throttle = THROTTLE_STOPPED_PWM
     last_help_refresh = 0.0
 
     # Draw static help
@@ -183,6 +185,7 @@ def run(stdscr):
         stdscr.addstr(2, 2, "↑ Up: forward    | ↓ Down: reverse")
         stdscr.addstr(3, 2, "← Left: steer L  | → Right: steer R")
         stdscr.addstr(4, 2, "Space: STOP throttle,  c: center steering,  q: quit")
+        stdscr.addstr(5, 0, f"Camera preview: {preview_status}")
         stdscr.addstr(6, 0, "Status:")
         stdscr.refresh()
 
