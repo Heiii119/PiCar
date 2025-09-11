@@ -123,7 +123,8 @@ picam2 = None
 
 def start_preview(): 
     print("""Start Picamera2 preview; returns a short status string.""")
-    global picam2 if Picamera2 is None or Preview is None: 
+    global picam2 
+    if Picamera2 is None or Preview is None: 
         return "unavailable (Picamera2 not installed)" 
         try: 
             picam2 = Picamera2() 
