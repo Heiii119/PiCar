@@ -131,7 +131,9 @@ def start_preview():
             picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) 
             try: 
                 picam2.start_preview(Preview.QTGL) 
-            except Exception: picam2.start_preview(Preview.QT) picam2.start() 
+            except Exception: 
+                picam2.start_preview(Preview.QT) 
+                picam2.start() 
             return "started" 
         except Exception as e: 
             return f"error: {e}"
