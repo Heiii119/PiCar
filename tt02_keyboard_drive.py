@@ -16,36 +16,20 @@
 # Wiring reminder:
 # - PCA9685 VCC -> Pi 3.3V, GND -> Pi GND, SDA/SCL -> Pi SDA/SCL
 # - External servo/ESC power to PCA9685 V+ rail (e.g., 5–6V, common ground with Pi)
-#!/usr/bin/env python3
-# tt02_keyboard_drive.py
-# Control TT02 RC car (PCA9685) with keyboard arrow keys in a terminal.
-# This variant requires Picamera2 to be installed and able to start a preview
-# before the program will run; it will exit with an explanatory message otherwise.
 
 import time
 import curses
 import signal
 import sys
 
-# Ensure Picamera2 is installed and Preview is available (fail fast)
-try:
-    # Preferred API import
-    from picamera2 import Picamera2, Preview
-except Exception as e:
-    # Try alternate import locations before failing
-    try:
-        from picamera2.picamera2 import Picamera2  # type: ignore
-        from picamera2.preview import Preview       # type: ignore
-    except Exception:
-        raise SystemExit(
-            "Picamera2 is required and must be installed and available.\n"
-            "On Raspberry Pi OS, you can install system packages (recommended) or the library:\n"
-            "  - sudo apt install python3-picamera2    # if available for your OS\n"
-            "  - or follow Raspberry Pi documentation for Picamera2 installation\n"
-            "Original import error:\n"
-            f"{e}"
-        )
-
+# ==========================
+# Optional camera preview
+# ==========================
+try: 
+    from picamera2 import Picamera2, Preview 
+except Exception: 
+    Picamera2 = None 
+    Preview = None
 # ==========================
 # User-provided constants
 # ==========================
@@ -132,76 +116,39 @@ def steering_center_pwm():
 def neutral_all(pwm: PCA9685Driver):
     pwm.set_pwm(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
     pwm.set_pwm(STEERING_CHANNEL, steering_center_pwm())
-
 # ==========================
-# Camera preview helper (required)
+# Camera preview helper 
 # ==========================
 picam2 = None
+def start_preview(): 
+    global picam2 
+    if Picamera2 is None or Preview is None: 
+        return "unavailable (Picamera2 not installed)" 
+        try: 
+            picam2 = Picamera2() 
+            picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) 
+            try: 
+                picam2.start_preview(Preview.QTGL) 
+                backend = "QTGL" 
+            except Exception: 
+                picam2.start_preview(Preview.QT) 
+                backend = "QT" 
+                picam2.start() 
+                return f"started ({backend})" 
+        except Exception as e: 
+            return f"error: {e}" 
+            return "unknown"
 
-def start_preview_or_exit():
-    """
-    Start a Picamera2 preview. If the preview cannot be started, exit the program
-    with an explanatory message. This enforces that Picamera2 is installed and
-    the camera/preview system is usable before continuing.
-    """
-    global picam2
-    try:
-        picam2 = Picamera2()
-        picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)}))
-    except Exception as e:
-        raise SystemExit(
-            "Unable to configure Picamera2. Ensure the camera is connected and Picamera2 is usable.\n"
-            f"Configuration error: {e}"
-        )
-
-    # Try the preferred preview backends, fall back to starting camera without GUI preview
-    try:
-        try:
-            picam2.start_preview(Preview.QTGL)
-            backend = "QTGL"
-        except Exception:
-            picam2.start_preview(Preview.QT)
-            backend = "QT"
-    except Exception as e:
-        # If preview backends fail, attempt to at least start the camera
-        try:
-            picam2.start()
-            backend = "started_no_preview"
-        except Exception as e2:
-            # Clean up
-            try:
-                picam2.stop()
-            except Exception:
-                pass
-            try:
-                picam2.close()
-            except Exception:
-                pass
-            picam2 = None
-            raise SystemExit(
-                "Could not start Picamera2 preview or camera. Ensure:\n"
-                " - Picamera2 is correctly installed\n"
-                " - The camera module is attached and enabled\n"
-                " - A display/wayland/X server is available for QT previews (if using QT preview)\n"
-                f"Preview error: {e}\nCamera start error: {e2}"
-            )
-    return f"started ({backend})"
-
-def stop_preview():
-    global picam2
-    try:
-        if picam2:
-            try:
-                picam2.stop()
-            except Exception:
-                pass
-            try:
-                picam2.close()
-            except Exception:
-                pass
-    finally:
+def stop_preview(): 
+    global picam2 
+    try: 
+        if picam2: 
+            picam2.stop() 
+            picam2.close() 
+    except Exception: 
+        pass 
+    finally: 
         picam2 = None
-
 # ==========================
 # Main control (curses UI)
 # ==========================
@@ -210,13 +157,10 @@ def run(stdscr):
     curses.cbreak()
     stdscr.keypad(True)
     stdscr.nodelay(True)
-    try:
-        curses.curs_set(0)
-    except Exception:
-        pass
-
-    # Start camera preview and exit if it can't be started
-    preview_status = start_preview_or_exit()
+    curses.curs_set(0)
+    
+    # Start camera preview 
+    preview_status = start_preview() 
 
     # Init PCA9685
     pwm = PCA9685Driver(address=PCA9685_I2C_ADDR, busnum=PCA9685_I2C_BUSNUM, frequency=PCA9685_FREQUENCY)
@@ -225,12 +169,13 @@ def run(stdscr):
     # Ensure safe neutral at start (arm ESC)
     neutral_all(pwm)
     time.sleep(1.0)
-
+    
     # State
     last_press = {'up': 0.0, 'down': 0.0, 'left': 0.0, 'right': 0.0}
-    last_steer = steering_center_pwm()
+    last_steer = steering_center_pwm() 
     last_throttle = THROTTLE_STOPPED_PWM
     last_help_refresh = 0.0
+
 
     # Draw static help
     def draw_help():
@@ -240,7 +185,7 @@ def run(stdscr):
         stdscr.addstr(2, 2, "↑ Up: forward    | ↓ Down: reverse")
         stdscr.addstr(3, 2, "← Left: steer L  | → Right: steer R")
         stdscr.addstr(4, 2, "Space: STOP throttle,  c: center steering,  q: quit")
-        stdscr.addstr(5, 0, f"Camera preview: {'running' if picam2 else 'not running'} ({preview_status})")
+        stdscr.addstr(5, 0, f"Camera preview: {'running' if picam2 else 'not running'} ")
         stdscr.addstr(6, 0, "Status:")
         stdscr.refresh()
 
