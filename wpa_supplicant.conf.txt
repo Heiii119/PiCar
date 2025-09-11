@@ -1,0 +1,28 @@
+country=HK
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+
+
+network={
+    ssid="uFi_227D35"
+    psk="1234567890"
+    priority=1
+}
+
+network={
+    ssid="robocar_5G"
+    psk="abcd1234"
+    priority=2
+}
+
+network={
+    ssid="donkey_5G"
+    psk="abcd1234"
+    priority=3
+}
+
+network={
+    ssid="TSEZ2019"
+    psk="proactive2019"
+    priority=4
+}
