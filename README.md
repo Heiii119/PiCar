@@ -27,7 +27,7 @@ if there is any detection error:
 
 
 
-# Programs and usage
+# Camera Programs and usage
 ```bash
 git clone https://github.com/<your-user>/<your-repo>.git
 cd <your-repo>
@@ -171,3 +171,25 @@ export QT_QPA_PLATFORM=xcb
 ```
 For smoother previews, try 1280x720 at 30 fps.
 All saved images land in captures/.
+
+# Driving Programs and usage
+### Requires:
+- I2C enabled on the Raspberry Pi
+- PCA9685 wired correctly
+  - Throttle ESC → PCA9685 channel 0 (pin 0)
+  - Steering servo → PCA9685 channel 1 (pin 1)
+
+### Run:
+```bash
+python3 tt02_keyboard_drive.py
+```
+### Controls: 
+↑/↓ = throttle forward/reverse
+←/→ = steering turn left/right
+Space = immediate throttle stop
+c = center steering
+Crtl+C = stop
+
+
+
+
