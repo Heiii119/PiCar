@@ -185,7 +185,7 @@ def run(stdscr):
         stdscr.addstr(2, 2, "↑ Up: forward    | ↓ Down: reverse")
         stdscr.addstr(3, 2, "← Left: steer L  | → Right: steer R")
         stdscr.addstr(4, 2, "Space: STOP throttle,  c: center steering,  q: quit")
-        stdscr.addstr(5, 0, f"Camera preview: {preview_status} | now: {'running' if picam2 else 'not running'} ")
+        stdscr.addstr(5, 0, f"Camera preview: {'running' if picam2 else 'not running'} ")
         stdscr.addstr(6, 0, "Status:")
         stdscr.refresh()
 
