@@ -116,7 +116,26 @@ def steering_center_pwm():
 def neutral_all(pwm: PCA9685Driver):
     pwm.set_pwm(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
     pwm.set_pwm(STEERING_CHANNEL, steering_center_pwm())
+# ==========================
+# Camera preview helper 
+# ==========================
+picam2 = None
 
+def start_preview(): 
+    print("""Start Picamera2 preview; returns a short status string.""")
+    global picam2 if Picamera2 is None or Preview is None: 
+        return "unavailable (Picamera2 not installed)" 
+        try: 
+            picam2 = Picamera2() 
+            picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) 
+            try: 
+                picam2.start_preview(Preview.QTGL) 
+            except Exception: picam2.start_preview(Preview.QT) picam2.start() 
+            return "started" 
+        except Exception as e: 
+            return f"error: {e}"
+
+def stop_preview(): global picam2 try: if picam2: picam2.stop() picam2.close() except Exception: pass finally: picam2 = None
 # ==========================
 # Main control (curses UI)
 # ==========================
@@ -135,6 +154,9 @@ def run(stdscr):
     neutral_all(pwm)
     time.sleep(1.0)
 
+    # Start camera preview 
+    preview_status = start_preview() 
+    
     # State
     last_press = {'up': 0.0, 'down': 0.0, 'left': 0.0, 'right': 0.0}
     last_steer = None
@@ -160,7 +182,7 @@ def run(stdscr):
             neutral_all(pwm)
             time.sleep(0.2)
         finally:
-            pass
+            stop_preview()
 
     # SIGINT safe shutdown
     def sigint_handler(signum, frame):
