@@ -138,7 +138,16 @@ def start_preview():
         except Exception as e: 
             return f"error: {e}"
 
-def stop_preview(): global picam2 try: if picam2: picam2.stop() picam2.close() except Exception: pass finally: picam2 = None
+def stop_preview(): 
+    global picam2 
+    try: 
+        if picam2: 
+            picam2.stop() 
+            picam2.close() 
+    except Exception: 
+        pass 
+    finally: 
+        picam2 = None
 # ==========================
 # Main control (curses UI)
 # ==========================
