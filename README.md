@@ -13,10 +13,10 @@ Option B plan for Python 3.7.3 on Raspbian Buster.
 Step 0: System prep
 ```bash
 sudo apt update
-sudo apt install -y python3-venv libatlas-base-dev
+sudo apt install -y python3-venv libatlas-base-dev libhdf5-103 libhdf5-dev cmake ninja-build git
 ```
 
-Step 1: Create and activate a clean virtual environment
+Step 1: Create and activate a clean virtualenv 
 ```bash
 python3 -m venv ~/dkc451
 source ~/dkc451/bin/activate
@@ -26,6 +26,7 @@ Step 2: Upgrade pip (keep a 3.7-compatible version) and clear cache
 ```bash
 python -m pip install --upgrade "pip<24" setuptools wheel
 python -m pip cache purge
+unset PIP_REQUIRE_HASHES 2>/dev/null || true
 ```
 
 Step 3: Get Donkeycar 4.5.1 (done)
@@ -36,21 +37,22 @@ git fetch --all --tags -f
 git checkout 4.5.1
 ```
 
-Step 4: Relax Donkeycar’s numpy pin from 1.19.0 to 1.19.5 (keeps TF 2.4 happy)
+Step 4: Create version constraints for TF 2.4 
 ```bash
-grep -nR "numpy==1.19" setup.* setup.cfg pyproject.toml requirements || true
-sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.py 2>/dev/null || true
-sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.cfg 2>/dev/null || true
+printf "numpy==1.19.5\nh5py<3\n" > constraints.txt
 ```
-Step 5: Preinstall a compatible numpy (1.19.5) from piwheels
+
+Step 5: Preinstall pinned numpy and h5py from piwheels (wheels only, no cache) 
 ```bash
-python -m pip install --no-cache-dir --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple "numpy==1.19.5"
+python -m pip install --no-cache-dir --only-binary=:all: --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple -c constraints.txt numpy==1.19.5 h5py==2.10.0
 ```
-Step 6: Install Donkeycar (editable) with pi extras
+
+Step 6: Install Donkeycar (editable) with Pi extras, no build isolation, respecting constraints 
 ```bash
-python -m pip install --no-cache-dir -e .[pi] --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
+python -m pip install --no-cache-dir --no-build-isolation -e .[pi] -c constraints.txt --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
 ```
-Step 7: Install TensorFlow 2.4.0 for cp37/armv7l
+
+Step 7:Install TensorFlow 2.4.0 (cp37, armv7l) 
 ```bash
 python -m pip install --no-cache-dir https://github.com/lhelontra/tensorflow-on-arm/releases/download/v2.4.0/tensorflow-2.4.0-cp37-none-linux_armv7l.whl
 ```
@@ -63,6 +65,22 @@ python -c "import tensorflow; print(tensorflow.__version__)"
 ```bash
 python - <<'PY' import sys, numpy as np import tensorflow as tf print(sys.version) print("numpy:", np.version) print("tensorflow:", tf.version) print("tf test:", tf.reduce_sum(tf.constant([[1.0,2.0],[3.0,4.0]])).numpy()) PY
 ````
+
+Troubleshooting (only if needed)
+
+Hash mismatch from piwheels:
+Ensure you used --no-cache-dir and the explicit --index-url https://www.piwheels.org/simple
+python -m pip cache purge
+unset PIP_REQUIRE_HASHES
+If Donkeycar tries to force numpy==1.19.0:
+The constraints usually win, but you can also update the pin inside the repo:
+grep -nR 'numpy==1.19' setup.* setup.cfg pyproject.toml requirements || true
+sed -i 's/numpy==1.19\b/numpy==1.19.5/g' setup.py 2>/dev/null || true
+sed -i 's/numpy==1.19\b/numpy==1.19.5/g' setup.cfg 2>/dev/null || true
+If piwheels keeps failing for h5py, build from PyPI (slower):
+python -m pip install --no-cache-dir --no-binary=:all: --index-url https://pypi.org/simple "h5py==2.10.0"
+Then re-run step 6.
+
 Notes and tips:
 Always use python -m pip inside the venv to avoid calling a system pip by mistake.
 If the sed commands don’t find anything to change, tell me what grep printed and I’ll adjust the one-liner.
