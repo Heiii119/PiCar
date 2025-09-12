@@ -4,6 +4,62 @@ Playing around with Raspberry Pi controlled RC car!
 ## Set up
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
+### install tensorflow
+Option B plan for Python 3.7.3 on Raspbian Buster. 
+- Use a fresh virtualenv Avoid the piwheels hash issue
+- Keep numpy at 1.19.x (use 1.19.5 for TF compatibility)
+- Install Donkeycar 4.5.1 and TensorFlow 2.4.0 (cp37/armv7l)
+Step 0 — System prep
+sudo apt update
+sudo apt install -y libatlas-base-dev
+
+Step 1 — Fresh venv and modern (but 3.7-safe) 
+pip python3 -m venv ~/dkc451 source ~/dkc451/bin/activate python -m 
+pip install --upgrade "pip<24" setuptools wheel 
+pip cache purge
+
+Step 2 — Get Donkeycar 4.5.1 (Done)
+git clone https://github.com/autorope/donkeycar 
+cd donkeycar 
+git fetch --all --tags -f 
+git checkout 4.5.1
+
+Step 3 — Relax Donkeycar’s numpy pin to 1.19.5
+
+Find where numpy is pinned:
+grep -nR "numpy==" setup.* pyproject.toml setup.cfg requirements || true
+
+If it shows "numpy==1.19" in setup.py, run:
+sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.py
+
+If it shows in setup.cfg instead, run the equivalent edit there:
+sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.cfg
+
+Step 4 — Preinstall a compatible numpy (1.19.5) 
+python3 -m pip install --no-cache-dir --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple "numpy==1.19.5"
+
+Step 5 — Install Donkeycar (editable) with pi extras 
+python3 -m pip install --no-cache-dir -e .[pi] --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
+
+Step 6 — Install TensorFlow 2.4.0 for cp37/armv7l 
+python -m pip install --no-cache-dir https://github.com/lhelontra/tensorflow-on-arm/releases/download/v2.4.0/tensorflow-2.4.0-cp37-none-linux_armv7l.whl
+
+Step 7 — Quick verification 
+python - <<'PY' import sys, numpy as np import tensorflow as tf print(sys.version) print("numpy:", np.version) print("tensorflow:", tf.version) a = tf.constant([[1.0,2.0],[3.0,4.0]]) print("tf ok:", tf.reduce_sum(a).numpy()) PY
+
+Notes and tips:
+Why edit the pin? Donkeycar 4.5.1 pins numpy==1.19.0, but TF 2.4.x requires numpy >= 1.19.2. Moving to 1.19.5 keeps both happy.
+Hash mismatch fix: using the main piwheels index plus --no-cache-dir avoids stale/mirrored files (the “archive1” hash you saw).
+If you still see “hashes do not match”:
+Ensure no global hash enforcement is set: echo $PIP_REQUIRE_HASHES; if set, run: unset PIP_REQUIRE_HASHES
+Re-run installs with --no-cache-dir and the explicit --index-url shown above
+If TF import complains about missing BLAS/HDF5 at runtime, install:
+sudo apt install -y libhdf5-103 libhdf5-dev
+Alternative (no file edits): install Donkeycar without deps, then manage deps yourself with numpy==1.19.5
+
+python -m pip install -e . --no-deps
+Then add its extras piece by piece (excluding numpy) or from its requirements after changing the numpy pin there. This is more manual; the edit approach above is simpler.
+
 # PiCam RGB/HSV Tools (No OpenCV)
 
 Live previews and color-space demos for Raspberry Pi cameras using Picamera2 + PyQt5 + Pillow.
