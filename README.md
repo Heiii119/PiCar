@@ -9,45 +9,61 @@ Option B plan for Python 3.7.3 on Raspbian Buster.
 - Use a fresh virtualenv Avoid the piwheels hash issue
 - Keep numpy at 1.19.x (use 1.19.5 for TF compatibility)
 - Install Donkeycar 4.5.1 and TensorFlow 2.4.0 (cp37/armv7l)
-Step 0 — System prep
+
+Step 0: System prep
+```bash
 sudo apt update
-sudo apt install -y libatlas-base-dev
+sudo apt install -y python3-venv libatlas-base-dev
+```
 
-Step 1 — Fresh venv and modern (but 3.7-safe) 
-pip python3 -m venv ~/dkc451 source ~/dkc451/bin/activate python -m 
-pip install --upgrade "pip<24" setuptools wheel 
-pip cache purge
+Step 1: Create and activate a clean virtual environment
+```bash
+python3 -m venv ~/dkc451
+source ~/dkc451/bin/activate
+```
 
-Step 2 — Get Donkeycar 4.5.1 (Done)
-git clone https://github.com/autorope/donkeycar 
-cd donkeycar 
-git fetch --all --tags -f 
+Step 2: Upgrade pip (keep a 3.7-compatible version) and clear cache
+```bash
+python -m pip install --upgrade "pip<24" setuptools wheel
+python -m pip cache purge
+```
+
+Step 3: Get Donkeycar 4.5.1 (done)
+```bash
+git clone https://github.com/autorope/donkeycar
+cd donkeycar
+git fetch --all --tags -f
 git checkout 4.5.1
+```
 
-Step 3 — Relax Donkeycar’s numpy pin to 1.19.5
-
-Find where numpy is pinned:
-grep -nR "numpy==" setup.* pyproject.toml setup.cfg requirements || true
-
-If it shows "numpy==1.19" in setup.py, run:
-sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.py
-
-If it shows in setup.cfg instead, run the equivalent edit there:
-sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.cfg
-
-Step 4 — Preinstall a compatible numpy (1.19.5) 
-python3 -m pip install --no-cache-dir --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple "numpy==1.19.5"
-
-Step 5 — Install Donkeycar (editable) with pi extras 
-python3 -m pip install --no-cache-dir -e .[pi] --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
-
-Step 6 — Install TensorFlow 2.4.0 for cp37/armv7l 
+Step 4: Relax Donkeycar’s numpy pin from 1.19.0 to 1.19.5 (keeps TF 2.4 happy)
+```bash
+grep -nR "numpy==1.19" setup.* setup.cfg pyproject.toml requirements || true
+sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.py 2>/dev/null || true
+sed -i "s/numpy==1.19\b/numpy==1.19.5/g" setup.cfg 2>/dev/null || true
+```
+Step 5: Preinstall a compatible numpy (1.19.5) from piwheels
+```bash
+python -m pip install --no-cache-dir --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple "numpy==1.19.5"
+```
+Step 6: Install Donkeycar (editable) with pi extras
+```bash
+python -m pip install --no-cache-dir -e .[pi] --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
+```
+Step 7: Install TensorFlow 2.4.0 for cp37/armv7l
+```bash
 python -m pip install --no-cache-dir https://github.com/lhelontra/tensorflow-on-arm/releases/download/v2.4.0/tensorflow-2.4.0-cp37-none-linux_armv7l.whl
+```
 
-Step 7 — Quick verification 
-python - <<'PY' import sys, numpy as np import tensorflow as tf print(sys.version) print("numpy:", np.version) print("tensorflow:", tf.version) a = tf.constant([[1.0,2.0],[3.0,4.0]]) print("tf ok:", tf.reduce_sum(a).numpy()) PY
-
+Quick verification
+```bash
+python - <<'PY' import sys, numpy as np import tensorflow as tf print(sys.version) print("numpy:", np.version) print("tensorflow:", tf.version) print("tf test:", tf.reduce_sum(tf.constant([[1.0,2.0],[3.0,4.0]])).numpy()) PY
+````
 Notes and tips:
+Always use python -m pip inside the venv to avoid calling a system pip by mistake.
+If the sed commands don’t find anything to change, tell me what grep printed and I’ll adjust the one-liner.
+If you ever see the hash mismatch again, keep using --no-cache-dir and the explicit --index-url https://www.piwheels.org/simple flags.
+
 Why edit the pin? Donkeycar 4.5.1 pins numpy==1.19.0, but TF 2.4.x requires numpy >= 1.19.2. Moving to 1.19.5 keeps both happy.
 Hash mismatch fix: using the main piwheels index plus --no-cache-dir avoids stale/mirrored files (the “archive1” hash you saw).
 If you still see “hashes do not match”:
