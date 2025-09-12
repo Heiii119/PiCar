@@ -1,6 +1,9 @@
 # PiCar
 Playing around with Raspberry Pi controlled RC car!
 
+## Set up
+https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
+
 # PiCam RGB/HSV Tools (No OpenCV)
 
 Live previews and color-space demos for Raspberry Pi cameras using Picamera2 + PyQt5 + Pillow.
