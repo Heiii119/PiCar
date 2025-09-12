@@ -56,6 +56,10 @@ python -m pip install --no-cache-dir https://github.com/lhelontra/tensorflow-on-
 ```
 
 Quick verification
+verify the tensorflow install:
+```bash
+python -c "import tensorflow; print(tensorflow.__version__)"
+```
 ```bash
 python - <<'PY' import sys, numpy as np import tensorflow as tf print(sys.version) print("numpy:", np.version) print("tensorflow:", tf.version) print("tf test:", tf.reduce_sum(tf.constant([[1.0,2.0],[3.0,4.0]])).numpy()) PY
 ````
