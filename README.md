@@ -45,11 +45,13 @@ printf "numpy==1.19.5\nh5py<3\n" > constraints.txt
 ```
 
 Step 5: Preinstall pinned numpy and h5py from piwheels (wheels only, no cache) 
-```bash
-python -m pip install "scikit-build<0.18"
-```
+
 ```bash
 python -m pip install --no-cache-dir --only-binary=:all: --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple -c constraints.txt numpy==1.19.5 h5py==2.10.0
+```
+Preinstall build helper (prevents “No module named skbuild” with --no-build-isolation)
+```bash
+python -m pip install --no-cache-dir "scikit-build<0.18"
 ```
 If a package insists on building and fails, try wheels-only to identify the culprit:
 ```bash
