@@ -5,9 +5,11 @@ Playing around with Raspberry Pi controlled RC car!
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
 ### install tensorflow
-Option B plan for Python 3.7.3 on Raspbian Buster. 
+for Python 3.7.3 on Raspbian Buster. 
 - Use a fresh virtualenv Avoid the piwheels hash issue
-- Keep numpy at 1.19.x (use 1.19.5 for TF compatibility)
+- Pins: numpy==1.19.5, h5py==2.10.0 (TF 2.4-friendly)
+- Uses piwheels and disables cache to avoid mirror/hash mismatches
+- Preinstalls scikit-build to satisfy builds when using --no-build-isolation
 - Install Donkeycar 4.5.1 and TensorFlow 2.4.0 (cp37/armv7l)
 
 Step 0: System prep
