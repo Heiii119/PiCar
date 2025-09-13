@@ -1,7 +1,7 @@
 # PiCar
 Playing around with Raspberry Pi controlled RC car!
 
-## Set up
+## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
 ### install tensorflow
@@ -114,6 +114,10 @@ Alternative (no file edits): install Donkeycar without deps, then manage deps yo
 
 python -m pip install -e . --no-deps
 Then add its extras piece by piece (excluding numpy) or from its requirements after changing the numpy pin there. This is more manual; the edit approach above is simpler.
+
+## set up on computer
+
+https://docs.donkeycar.com/guide/create_application/
 
 # PiCam RGB/HSV Tools (No OpenCV)
 
