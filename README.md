@@ -54,6 +54,9 @@ Preinstall build helper (prevents “No module named skbuild” with --no-build-
 python -m pip install --no-cache-dir "scikit-build<0.18"
 ```
 If a package insists on building and fails, try wheels-only to identify the culprit:
+This is to check if everything has wheels. 
+If it succeeds, you’re done and can skip step 6.
+
 ```bash
 python -m pip install --only-binary=:all: -e .[pi] --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
 ```
