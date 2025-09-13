@@ -73,12 +73,12 @@ Ensure you used --no-cache-dir and the explicit --index-url https://www.piwheels
 ```bash
 python -m pip cache purge
 unset PIP_REQUIRE_HASHES
-If Donkeycar tries to force numpy==1.19.0:
-The constraints usually win, but you can also update the pin inside the repo:
 grep -nR 'numpy==1.19' setup.* setup.cfg pyproject.toml requirements || true
 sed -i 's/numpy==1.19\b/numpy==1.19.5/g' setup.py 2>/dev/null || true
 sed -i 's/numpy==1.19\b/numpy==1.19.5/g' setup.cfg 2>/dev/null || true
+```
 If piwheels keeps failing for h5py, build from PyPI (slower):
+```bash
 python -m pip install --no-cache-dir --no-binary=:all: --index-url https://pypi.org/simple "h5py==2.10.0"
 ```
 Then re-run step 6.
