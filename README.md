@@ -336,7 +336,7 @@ Before running:
 python3 drive_train_autopilot_picam2.py
 ```
 
-#camera lagacy problem:
+# camera lagacy problem:
 1. Check and disable the legacy V4L2 driver
 ```bash
 # Check if legacy V4L2 driver is loaded
