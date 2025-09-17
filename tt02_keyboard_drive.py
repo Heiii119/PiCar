@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # tt02_keyboard_drive.py
 # Control TT02 RC car (PCA9685) with keyboard arrow keys in a terminal.
+# Keyboard control for ESC (throttle) and servo (steering) via Adafruit PCA9685.
+# Works in a regular terminal (SSH friendly). Requires: Adafruit-PCA9685 pip package.
+# Keys: arrows or WASD, Space=stop, C=center, Q=quit.
 # - Up:     throttle forward
 # - Down:   throttle reverse
 # - Left:   steer left
@@ -17,10 +20,7 @@
 # - PCA9685 VCC -> Pi 3.3V, GND -> Pi GND, SDA/SCL -> Pi SDA/SCL
 # - External servo/ESC power to PCA9685 V+ rail (e.g., 5–6V, common ground with Pi)
 
-#!/usr/bin/env python3
-# Keyboard control for ESC (throttle) and servo (steering) via Adafruit PCA9685.
-# Works in a regular terminal (SSH friendly). Requires: Adafruit-PCA9685 pip package.
-# Keys: arrows or WASD, Space=stop, C=center, Q=quit.
+
 
 import sys
 import time
@@ -33,7 +33,7 @@ import signal
 # User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR   = 0x40
-I2C_BUSNUM         = 1   # None for default (usually 1)
+I2C_BUSNUM         = 1      # Force Raspberry Pi primary I2C bus
 
 PCA9685_FREQUENCY  = 60     # 50–60 Hz typical for servo/ESC
 
@@ -42,12 +42,12 @@ THROTTLE_CHANNEL   = 0
 STEERING_CHANNEL   = 1
 
 # PWM values (0..4095). Tune for your hardware!
-THROTTLE_FORWARD_PWM  = 430
+THROTTLE_FORWARD_PWM  = 480
 THROTTLE_STOPPED_PWM  = 370
-THROTTLE_REVERSE_PWM  = 320
+THROTTLE_REVERSE_PWM  = 220
 
-STEERING_LEFT_PWM     = 450
-STEERING_RIGHT_PWM    = 270
+STEERING_LEFT_PWM     = 500
+STEERING_RIGHT_PWM    = 240
 
 # Safety: require stop before switching FWD<->REV
 SWITCH_PAUSE_S = 0.06
@@ -57,9 +57,6 @@ SWITCH_PAUSE_S = 0.06
 # ==========================
 try:
     import Adafruit_PCA9685 as LegacyPCA9685
-    I2C_BUSNUM = 1
-    pwm_driver = LegacyPCA9685.PCA9685(address=0x40, busnum=I2C_BUSNUM)
-    pwm_driver.set_pwm_freq(60)
 except ImportError:
     sys.exit("Missing Adafruit-PCA9685. Activate your venv and run: pip install Adafruit-PCA9685")
 
@@ -73,11 +70,6 @@ class PWM:
     def __init__(self, address, busnum, freq_hz):
         # Force bus selection to avoid auto-detect issues
         self.dev = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
-        self.dev.set_pwm_freq(freq_hz)
-        if busnum is None:
-            self.dev = LegacyPCA9685.PCA9685(address=address)
-        else:
-            self.dev = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
         self.dev.set_pwm_freq(freq_hz)
 
     def set(self, channel, value_12bit):
@@ -147,14 +139,23 @@ def main():
 
     signal.signal(signal.SIGINT, on_sigint)
 
+    # Startup instructions
+    print("# Control TT02 RC car (PCA9685) with keyboard arrow keys in a terminal.")
+    print("# - Up:     throttle forward")
+    print("# - Down:   throttle reverse")
+    print("# - Left:   steer left")
+    print("# - Right:  steer right")
+    print("# - Space:  immediate throttle stop")
+    print("# - c:      center steering")
+    print("# - q:      quit (safely stops and centers)")
+    print()
+
     neutral_all()
     time.sleep(1.0)  # Allow ESC to arm
 
     last_throttle = THROTTLE_STOPPED_PWM
 
     print("TT02 Keyboard Drive (simple)")
-    print("Controls: Arrow keys or WASD for steer/throttle")
-    print("Space=STOP, C=CENTER, Q=QUIT")
     print(f"Throttle: FWD={THROTTLE_FORWARD_PWM} STOP={THROTTLE_STOPPED_PWM} REV={THROTTLE_REVERSE_PWM}")
     print(f"Steering: L={STEERING_LEFT_PWM} C={steering_center_pwm()} R={STEERING_RIGHT_PWM}")
 
