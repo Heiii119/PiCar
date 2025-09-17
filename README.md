@@ -308,6 +308,30 @@ Space = immediate throttle stop
 c = center steering
 Crtl+C = stop
 
+## autopilot
+- Opens a Picamera2 preview window
+- Lets you record training data while you drive using keyboard controls
+- Trains a small TF 2.4 model on frames + steering/throttle labels
+- Runs a basic autopilot loop using the trained model
 
+Notes:
+- Uses Picamera2 preview with DRM/KMS via its built-in preview window; we also add a simple HUD by overlaying text with the Picamera2 annotation helper.
+- Keyboard input is read from stdin in raw mode (no OpenCV). Terminal must be focused.
+- Controls: a/d or Left/Right to steer, w/s or Up/Down for throttle, space to stop, c to center steering, r to start/stop recording, q to quit.
+- Data stored under ./data/session_<timestamp>/images plus labels.csv.
+- Uses Adafruit PCA9685 for steering/motor as per your PWM config.
+- If running headless (no display), set with_preview=False in PiCam2Manager, and it will still capture frames without opening a window.
+- Some environments may require Preview.DRM rather than Preview.QTGL; switch start_preview(Preview.DRM) if QTGL isn’t available.
+- First tests: lift wheels off the ground. Many ESCs require “stop” PWM for 1–2 seconds before throttle.
+- If steering or throttle directions are reversed, set PWM_STEERING_INVERTED or PWM_THROTTLE_INVERTED to True.
 
+Before running:
+- sudo apt-get install -y python3-libcamera python3-picamera2
+- pip3 install adafruit-circuitpython-pca9685 adafruit-blinka RPi.GPIO
+- Enable I2C (sudo raspi-config) and ensure PCA9685 at address 0x40.
+- Ensure you can open a Picamera2 preview (KMS/DRM). If running headless/SSH, set preview="null" and skip preview.
 
+### Run:
+```bash
+python3 drive_train_autopilot_picam2.py
+```
