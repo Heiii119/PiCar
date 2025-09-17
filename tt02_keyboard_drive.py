@@ -17,291 +17,184 @@
 # - PCA9685 VCC -> Pi 3.3V, GND -> Pi GND, SDA/SCL -> Pi SDA/SCL
 # - External servo/ESC power to PCA9685 V+ rail (e.g., 5–6V, common ground with Pi)
 
-import time
-import curses
-import signal
+#!/usr/bin/env python3
+# Keyboard control for ESC (throttle) and servo (steering) via Adafruit PCA9685.
+# Works in a regular terminal (SSH friendly). Requires: Adafruit-PCA9685 pip package.
+# Keys: arrows or WASD, Space=stop, C=center, Q=quit.
+
 import sys
+import time
+import termios
+import tty
+import select
+import signal
 
 # ==========================
-# Optional camera preview
-# ==========================
-try: 
-    from picamera2 import Picamera2, Preview 
-except Exception: 
-    Picamera2 = None 
-    Preview = None
-# ==========================
-# User-provided constants
+# User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR   = 0x40
-PCA9685_I2C_BUSNUM = None  # None = default I2C bus (usually 1 on Pi)
+I2C_BUSNUM         = None   # None for default (usually 1)
 
-# STEERING
-STEERING_CHANNEL     = 1
-STEERING_LEFT_PWM    = 500
-STEERING_RIGHT_PWM   = 240
+PCA9685_FREQUENCY  = 60     # 50–60 Hz typical for servo/ESC
 
-# THROTTLE
-THROTTLE_CHANNEL       = 0
-THROTTLE_FORWARD_PWM   = 480
-THROTTLE_STOPPED_PWM   = 370
-THROTTLE_REVERSE_PWM   = 220
+# Channels
+THROTTLE_CHANNEL   = 0
+STEERING_CHANNEL   = 1
 
-# PCA9685 update rate (Hz) for servos/ESCs
-PCA9685_FREQUENCY = 60
+# PWM values (0..4095). Tune for your hardware!
+THROTTLE_FORWARD_PWM  = 480
+THROTTLE_STOPPED_PWM  = 370
+THROTTLE_REVERSE_PWM  = 220
 
-# How long to treat key as "held" after last repeat (seconds)
-KEY_HOLD_TIMEOUT = 0.20
+STEERING_LEFT_PWM     = 500
+STEERING_RIGHT_PWM    = 240
 
-# UI refresh rate (Hz)
-UI_FPS = 50.0
+# Safety: require stop before switching FWD<->REV
+SWITCH_PAUSE_S = 0.06
 
 # ==========================
-# PCA9685 Driver (supports both legacy and CircuitPython libs)
+# PCA9685 init (legacy lib)
 # ==========================
-class PCA9685Driver:
-    def __init__(self, address=0x40, busnum=None, frequency=60):
-        self._mode = None  # 'legacy' or 'cp'
-        self._driver = None
-        # Try legacy Adafruit_PCA9685 first
-        try:
-            import Adafruit_PCA9685 as LegacyPCA9685
-            if busnum is None:
-                self._driver = LegacyPCA9685.PCA9685(address=address)
-            else:
-                self._driver = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
-            self._driver.set_pwm_freq(frequency)
-            self._mode = 'legacy'
-        except Exception:
-            # Fallback to CircuitPython library
-            try:
-                import board
-                import busio
-                from adafruit_pca9685 import PCA9685 as CPPCA9685
-                i2c = busio.I2C(board.SCL, board.SDA)
-                self._driver = CPPCA9685(i2c, address=address)
-                self._driver.frequency = frequency
-                self._mode = 'cp'
-            except Exception as e:
-                raise SystemExit(
-                    "Could not initialize PCA9685. Please install one of:\n"
-                    "  - Legacy:  pip3 install Adafruit-PCA9685\n"
-                    "  - CircuitPython: pip3 install adafruit-circuitpython-pca9685\n"
-                    f"Original error: {e}"
-                )
+try:
+    import Adafruit_PCA9685 as LegacyPCA9685
+except ImportError:
+    sys.exit("Missing Adafruit-PCA9685. Activate your venv and run: pip install Adafruit-PCA9685")
 
-    def set_pwm_freq(self, freq_hz):
-        if self._mode == 'legacy':
-            self._driver.set_pwm_freq(freq_hz)
-        elif self._mode == 'cp':
-            self._driver.frequency = freq_hz
-
-    def set_pwm(self, channel, value_12bit):
-        # Clamp to 0..4095
-        v = max(0, min(4095, int(value_12bit)))
-        if self._mode == 'legacy':
-            # on=0, off=v
-            self._driver.set_pwm(channel, 0, v)
-        elif self._mode == 'cp':
-            # CircuitPython uses 16-bit duty_cycle
-            dc = int(round((v / 4095.0) * 65535.0))
-            self._driver.channels[channel].duty_cycle = dc
-
-# ==========================
-# Helper functions
-# ==========================
 def steering_center_pwm():
     return int(round((STEERING_LEFT_PWM + STEERING_RIGHT_PWM) / 2.0))
 
-def neutral_all(pwm: PCA9685Driver):
-    pwm.set_pwm(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-    pwm.set_pwm(STEERING_CHANNEL, steering_center_pwm())
+def clamp12(x):
+    return max(0, min(4095, int(x)))
+
+class PWM:
+    def __init__(self, address, busnum, freq_hz):
+        if busnum is None:
+            self.dev = LegacyPCA9685.PCA9685(address=address)
+        else:
+            self.dev = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
+        self.dev.set_pwm_freq(freq_hz)
+
+    def set(self, channel, value_12bit):
+        v = clamp12(value_12bit)
+        self.dev.set_pwm(channel, 0, v)
+
 # ==========================
-# Camera preview helper 
+# Non-blocking keyboard input
 # ==========================
-picam2 = None
-def start_preview(): 
-    global picam2 
-    if Picamera2 is None or Preview is None: 
-        return "unavailable (Picamera2 not installed)" 
-        try: 
-            picam2 = Picamera2() 
-            picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) 
-            try: 
-                picam2.start_preview(Preview.QTGL) 
-                backend = "QTGL" 
-            except Exception: 
-                picam2.start_preview(Preview.QT) 
-                backend = "QT" 
-                picam2.start() 
-                return f"started ({backend})" 
-        except Exception as e: 
-            return f"error: {e}" 
-            return "unknown"
+class KB:
+    def __enter__(self):
+        self.fd = sys.stdin.fileno()
+        self.old = termios.tcgetattr(self.fd)
+        tty.setcbreak(self.fd)
+        return self
 
-def stop_preview(): 
-    global picam2 
-    try: 
-        if picam2: 
-            picam2.stop() 
-            picam2.close() 
-    except Exception: 
-        pass 
-    finally: 
-        picam2 = None
+    def __exit__(self, exc_type, exc, tb):
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def poll(self, timeout=0.0):
+        # Return a list of raw chars read without blocking
+        r, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not r:
+            return []
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':  # possible escape sequence
+            time.sleep(0.001)
+            while select.select([sys.stdin], [], [], 0)[0]:
+                ch += sys.stdin.read(1)
+        return [ch]
+
+def decode_key(ch):
+    # Arrow sequences commonly: '\x1b[A' up, '\x1b[B' down, '\x1b[D' left, '\x1b[C' right
+    if ch in ('w', 'W', '\x1b[A'):
+        return 'UP'
+    if ch in ('s', 'S', '\x1b[B'):
+        return 'DOWN'
+    if ch in ('a', 'A', '\x1b[D'):
+        return 'LEFT'
+    if ch in ('d', 'D', '\x1b[C'):
+        return 'RIGHT'
+    if ch == ' ':
+        return 'SPACE'
+    if ch in ('c', 'C'):
+        return 'CENTER'
+    if ch in ('q', 'Q', '\x03'):  # Ctrl-C as quit
+        return 'QUIT'
+    return None
+
 # ==========================
-# Main control (curses UI)
+# Main
 # ==========================
-def run(stdscr):
-    curses.noecho()
-    curses.cbreak()
-    stdscr.keypad(True)
-    stdscr.nodelay(True)
-    curses.curs_set(0)
-    
-    # Start camera preview 
-    preview_status = start_preview() 
-
-    # Init PCA9685
-    pwm = PCA9685Driver(address=PCA9685_I2C_ADDR, busnum=PCA9685_I2C_BUSNUM, frequency=PCA9685_FREQUENCY)
-    pwm.set_pwm_freq(PCA9685_FREQUENCY)
-
-    # Ensure safe neutral at start (arm ESC)
-    neutral_all(pwm)
-    time.sleep(1.0)
-    
-    # State
-    last_press = {'up': 0.0, 'down': 0.0, 'left': 0.0, 'right': 0.0}
-    last_steer = steering_center_pwm() 
-    last_throttle = THROTTLE_STOPPED_PWM
-    last_help_refresh = 0.0
-
-
-    # Draw static help
-    def draw_help():
-        stdscr.clear()
-        stdscr.addstr(0, 0, "TT02 Keyboard Drive (PCA9685)")
-        stdscr.addstr(1, 0, "Controls:")
-        stdscr.addstr(2, 2, "↑ Up: forward    | ↓ Down: reverse")
-        stdscr.addstr(3, 2, "← Left: steer L  | → Right: steer R")
-        stdscr.addstr(4, 2, "Space: STOP throttle,  c: center steering,  q: quit")
-        stdscr.addstr(5, 0, f"Camera preview: {'running' if picam2 else 'not running'} ")
-        stdscr.addstr(6, 0, "Status:")
-        stdscr.refresh()
-
-    draw_help()
-
-    # Cleanup handler
-    def cleanup_and_exit():
-        try:
-            neutral_all(pwm)
-            time.sleep(0.2)
-        finally:
-            stop_preview()
-
-    # SIGINT safe shutdown
-    def sigint_handler(signum, frame):
-        cleanup_and_exit()
-        curses.nocbreak()
-        stdscr.keypad(False)
-        curses.echo()
-        curses.endwin()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, sigint_handler)
-
-    # Main loop
-    dt = 1.0 / UI_FPS
-    try:
-        while True:
-            t = time.time()
-            # Drain input buffer this frame
-            while True:
-                ch = stdscr.getch()
-                if ch == -1:
-                    break
-                if ch in (curses.KEY_UP, ord('w'), ord('W')):
-                    last_press['up'] = t
-                elif ch in (curses.KEY_DOWN, ord('s'), ord('S')):
-                    last_press['down'] = t
-                elif ch in (curses.KEY_LEFT, ord('a'), ord('A')):
-                    last_press['left'] = t
-                elif ch in (curses.KEY_RIGHT, ord('d'), ord('D')):
-                    last_press['right'] = t
-                elif ch in (ord(' '),):
-                    # Emergency stop throttle
-                    last_press['up'] = 0.0
-                    last_press['down'] = 0.0
-                    pwm.set_pwm(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-                    last_throttle = THROTTLE_STOPPED_PWM
-                elif ch in (ord('c'), ord('C')):
-                    pwm.set_pwm(STEERING_CHANNEL, steering_center_pwm())
-                    last_steer = steering_center_pwm()
-                elif ch in (ord('q'), ord('Q')):
-                    cleanup_and_exit()
-                    return
-
-            # Determine "active" keys using a short hold timeout (smooths key repeat gaps)
-            def active(key):
-                return (t - last_press[key]) < KEY_HOLD_TIMEOUT
-
-            up = active('up')
-            down = active('down')
-            left = active('left')
-            right = active('right')
-
-            # Decide throttle command
-            if up and not down:
-                throttle_pwm = THROTTLE_FORWARD_PWM
-            elif down and not up:
-                # Simple safety: if switching from forward to reverse, pass through stop
-                if last_throttle == THROTTLE_FORWARD_PWM:
-                    pwm.set_pwm(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-                    time.sleep(0.05)
-                throttle_pwm = THROTTLE_REVERSE_PWM
-            else:
-                throttle_pwm = THROTTLE_STOPPED_PWM
-
-            # Decide steering command
-            if left and not right:
-                steer_pwm = STEERING_LEFT_PWM
-            elif right and not left:
-                steer_pwm = STEERING_RIGHT_PWM
-            else:
-                steer_pwm = steering_center_pwm()
-
-            # Apply only if changed (reduces I2C traffic)
-            if throttle_pwm != last_throttle:
-                pwm.set_pwm(THROTTLE_CHANNEL, throttle_pwm)
-                last_throttle = throttle_pwm
-
-            if steer_pwm != last_steer:
-                pwm.set_pwm(STEERING_CHANNEL, steer_pwm)
-                last_steer = steer_pwm
-
-            # Status display
-            if (t - last_help_refresh) > 0.1:
-                last_help_refresh = t
-                stdscr.addstr(7, 0, f"Throttle: {last_throttle:4d}  (FWD:{THROTTLE_FORWARD_PWM} STOP:{THROTTLE_STOPPED_PWM} REV:{THROTTLE_REVERSE_PWM})      ")
-                stdscr.addstr(8, 0, f"Steering: {last_steer:4d}   (L:{STEERING_LEFT_PWM} C:{steering_center_pwm()} R:{STEERING_RIGHT_PWM})      ")
-                stdscr.addstr(10, 0, "Hold arrows to drive. Release to stop/center. 'q' to quit.                  ")
-                stdscr.refresh()
-
-            time.sleep(dt)
-
-    finally:
-        # Ensure safe neutral and restore terminal even on exceptions
-        try:
-            cleanup_and_exit()
-        except Exception:
-            pass
-        curses.nocbreak()
-        stdscr.keypad(False)
-        curses.echo()
-        curses.endwin()
-
 def main():
-    curses.wrapper(run)
+    pwm = PWM(PCA9685_I2C_ADDR, I2C_BUSNUM, PCA9685_FREQUENCY)
+
+    def neutral_all():
+        pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
+        pwm.set(STEERING_CHANNEL, steering_center_pwm())
+
+    def on_sigint(signum, frame):
+        try:
+            neutral_all()
+            time.sleep(0.1)
+        finally:
+            print("\nExiting safely.")
+            sys.exit(0)
+
+    signal.signal(signal.SIGINT, on_sigint)
+
+    neutral_all()
+    time.sleep(1.0)  # Allow ESC to arm
+
+    last_throttle = THROTTLE_STOPPED_PWM
+
+    print("TT02 Keyboard Drive (simple)")
+    print("Controls: Arrow keys or WASD for steer/throttle")
+    print("Space=STOP, C=CENTER, Q=QUIT")
+    print(f"Throttle: FWD={THROTTLE_FORWARD_PWM} STOP={THROTTLE_STOPPED_PWM} REV={THROTTLE_REVERSE_PWM}")
+    print(f"Steering: L={STEERING_LEFT_PWM} C={steering_center_pwm()} R={STEERING_RIGHT_PWM}")
+
+    with KB() as kb:
+        while True:
+            keys = kb.poll(timeout=0.02)
+            for raw in keys:
+                key = decode_key(raw)
+                if key == 'QUIT':
+                    neutral_all()
+                    return
+                elif key == 'SPACE':
+                    pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
+                    last_throttle = THROTTLE_STOPPED_PWM
+                    print("Throttle: STOP")
+                elif key == 'CENTER':
+                    val = steering_center_pwm()
+                    pwm.set(STEERING_CHANNEL, val)
+                    print("Steering: CENTER")
+                elif key == 'UP':
+                    if last_throttle == THROTTLE_REVERSE_PWM:
+                        pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
+                        time.sleep(SWITCH_PAUSE_S)
+                    pwm.set(THROTTLE_CHANNEL, THROTTLE_FORWARD_PWM)
+                    last_throttle = THROTTLE_FORWARD_PWM
+                    print("Throttle: FORWARD")
+                elif key == 'DOWN':
+                    if last_throttle == THROTTLE_FORWARD_PWM:
+                        pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
+                        time.sleep(SWITCH_PAUSE_S)
+                    pwm.set(THROTTLE_CHANNEL, THROTTLE_REVERSE_PWM)
+                    last_throttle = THROTTLE_REVERSE_PWM
+                    print("Throttle: REVERSE")
+                elif key == 'LEFT':
+                    pwm.set(STEERING_CHANNEL, STEERING_LEFT_PWM)
+                    print("Steering: LEFT")
+                elif key == 'RIGHT':
+                    pwm.set(STEERING_CHANNEL, STEERING_RIGHT_PWM)
+                    print("Steering: RIGHT")
+
+            time.sleep(0.005)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: {e}")
+        print("Tip: Ensure I2C is enabled and Adafruit-PCA9685 is installed in your venv.")
+        sys.exit(1)
