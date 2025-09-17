@@ -9,7 +9,8 @@ https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3-venv python3-full
-python3 -m venv ~/tt02-venv source ~/tt02-venv/bin/activate
+python3 -m venv ~/tt02-venv
+source ~/tt02-venv/bin/activate
 pip install Adafruit-PCA9685
 ```
 Later, to use again: ```source ~/tt02-venv/bin/activate```
