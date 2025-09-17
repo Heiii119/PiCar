@@ -7,10 +7,12 @@ https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
 ### setup virtual env
 ```bash
-python3 -m virtualenv -p python3 env --system-site-packages
-echo "source ~/env/bin/activate" >> ~/.bashrc
-source ~/.bashrc
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-full
+python3 -m venv ~/tt02-venv source ~/tt02-venv/bin/activate
+pip install Adafruit-PCA9685
 ```
+Later, to use again: ```source ~/tt02-venv/bin/activate```
 
 ### install tensorflow
 for Python 3.7.3 on Raspbian Buster. 
