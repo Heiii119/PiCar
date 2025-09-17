@@ -4,6 +4,12 @@ Playing around with Raspberry Pi controlled RC car!
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
+
+### setup virtual env
+python3 -m virtualenv -p python3 env --system-site-packages
+echo "source ~/env/bin/activate" >> ~/.bashrc
+source ~/.bashrc
+
 ### install tensorflow
 for Python 3.7.3 on Raspbian Buster. 
 - Use a fresh virtualenv Avoid the piwheels hash issue
@@ -334,67 +340,4 @@ Before running:
 ### Run:
 ```bash
 python3 drive_train_autopilot_picam2.py
-```
-
-# camera lagacy problem:
-1. Check and disable the legacy V4L2 driver
-```bash
-# Check if legacy V4L2 driver is loaded
-lsmod | grep bcm2835_v4l2
-
-# Blacklist it so it won't auto-load on boot
-echo "blacklist bcm2835-v4l2" | sudo tee /etc/modprobe.d/blacklist-bcm2835_v4l2.conf
-
-# Ensure it's not forced to load
-sudo sed -i '/^bcm2835-v4l2/d' /etc/modules
-```
-
-2. Clean legacy entries from boot config
-```bash
-# Backup configs (some paths may not exist depending on OS; that's OK)
-sudo cp /boot/config.txt /boot/config.txt.bak 2>/dev/null || true
-sudo cp /boot/firmware/config.txt /boot/firmware/config.txt.bak 2>/dev/null || true
-
-# Remove legacy lines if present
-sudo sed -i -e '/^dtoverlay=bcm2835-v4l2/d' \
-            -e '/^start_x=1/d' \
-            -e '/^gpu_mem=/d' \
-            /boot/config.txt 2>/dev/null || true
-
-sudo sed -i -e '/^dtoverlay=bcm2835-v4l2/d' \
-            -e '/^start_x=1/d' \
-            -e '/^gpu_mem=/d' \
-            /boot/firmware/config.txt 2>/dev/null || true
-
-# Optionally set a sane gpu_mem (not required for libcamera, but fine)
-echo "gpu_mem=76" | sudo tee -a /boot/config.txt >/dev/null
-echo "gpu_mem=76" | sudo tee -a /boot/firmware/config.txt >/dev/null
-```
-
-3. Enable the modern camera interface (libcamera) ```sudo raspi-config```
-4. Reboot ```sudo reboot```
-5. test
-```bash
-# Headless-safe capture test
-libcamera-jpeg -o test.jpg
-
-# Preview test (requires a local display/session)
-libcamera-hello -t 0
-```
-
-
-6. If it still says “configured for legacy,” collect diagnostics and share output
-```bash
-echo "--- CONFIG CHECKS ---"
-grep -nE 'bcm2835-v4l2|start_x|dtoverlay' /boot/config.txt /boot/firmware/config.txt 2>/dev/null || true
-
-echo "--- MODULES ---"
-lsmod | grep -E 'bcm2835_v4l2|unicam' || true
-
-echo "--- DMESG CAMERA ---"
-dmesg | grep -Ei 'unicam|bcm2835_v4l2|imx|ov|arducam' | tail -n 200
-
-echo "--- ENV ---"
-cat /etc/os-release | sed -n '1,8p'
-uname -a
 ```
