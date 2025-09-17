@@ -4,7 +4,6 @@ Playing around with Raspberry Pi controlled RC car!
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
-
 ### setup virtual env
 ```bash
 sudo apt-get update
@@ -14,6 +13,13 @@ source ~/tt02-venv/bin/activate
 pip3 install Adafruit-PCA9685
 ```
 Later, to use again: ```source ~/tt02-venv/bin/activate```
+
+### Configure I2C PCA9685 servo board
+```bash
+sudo apt-get install -y i2c-tools
+sudo i2cdetect -y 1
+```
+
 
 ### install tensorflow
 for Python 3.7.3 on Raspbian Buster. 
