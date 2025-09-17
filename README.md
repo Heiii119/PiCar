@@ -11,7 +11,7 @@ sudo apt-get update
 sudo apt-get install -y python3-venv python3-full
 python3 -m venv ~/tt02-venv
 source ~/tt02-venv/bin/activate
-pip install Adafruit-PCA9685
+pip3 install Adafruit-PCA9685
 ```
 Later, to use again: ```source ~/tt02-venv/bin/activate```
 
