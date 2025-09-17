@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# install.sh — PiCar (TT02) + Picamera2 setup
-# - Prefers APT, falls back to pip where appropriate
-# - Works on Bookworm and most recent Raspberry Pi OS images
-# - Optional rpicam-apps; skipped if unavailable
-# - Installs PCA9685 libs via pip (user site)
-# - Leaves TensorFlow install to you (TF 2.4.0 assumed already present)
+# install.sh — TT02 + Picamera2 setup (PiCam only; disables Coral/EdgeTPU APT repos)
+# Keeps original packages:
+#   python3-picamera2 python3-pyqt5 i2c-tools python3-numpy python3-pil
+# Adds minimal extras:
+#   python3-pip python3-smbus python3-smbus2 qtwayland5 git
+#   rpicam-apps (or libcamera-apps as fallback) for rpicam-hello
+# Installs PCA9685 Python libs to user site
 
-set -euo pipefail
+set -u
+set -o pipefail
 
 FAILED_PKGS=()
 DISABLED_CORAL_FILES=()
@@ -20,14 +22,13 @@ apt_install_one() {
   if ! sudo apt-get install -y "$pkg"; then
     echo "WARNING: Failed to install $pkg"
     FAILED_PKGS+=("$pkg")
-    return 1
+    return 0
   fi
 }
 
 disable_coral_repos() {
   echo "==> Checking for Coral/EdgeTPU APT sources to disable..."
   local changed=0
-  shopt -s nullglob
   for f in /etc/apt/sources.list.d/*coral*.list /etc/apt/sources.list.d/*edgetpu*.list /etc/apt/sources.list.d/*cloud*.list; do
     [[ -f "$f" ]] || continue
     if grep -Ei 'coral|edgetpu|packages\.cloud\.google\.com' "$f" >/dev/null 2>&1; then
@@ -41,13 +42,12 @@ disable_coral_repos() {
       fi
     fi
   done
-  shopt -u nullglob
   if (( changed == 0 )); then
     echo "   No Coral/EdgeTPU sources found (nothing to disable)."
   fi
 }
 
-echo "=== PiCar (TT02) setup — Picamera2 only ==="
+echo "=== TT02 setup (PiCam only) ==="
 if ! have_cmd sudo; then echo "ERROR: sudo not found."; exit 1; fi
 if ! have_cmd python3; then echo "ERROR: python3 not found."; exit 1; fi
 
@@ -68,41 +68,26 @@ if ! sudo apt-get update; then
   fi
 fi
 
-echo "==> Installing base dependencies via APT..."
-apt_install_one i2c-tools || true
-apt_install_one python3-pip || true
-apt_install_one python3-numpy || true
-apt_install_one python3-pil || true
-apt_install_one python3-smbus || true
-apt_install_one git || true
-# Qt backends for Picamera2 preview (optional but recommended if using on-device preview)
-apt_install_one python3-pyqt5 || true
-apt_install_one qtwayland5 || true
+# Keep your original packages
+apt_install_one python3-picamera2
+apt_install_one python3-pyqt5
+apt_install_one i2c-tools
+apt_install_one python3-numpy
+apt_install_one python3-pil
 
-echo "==> Attempting to install Picamera2 via APT, then pip if needed..."
-if ! apt_install_one python3-picamera2; then
-  echo "   APT python3-picamera2 not available; trying pip (user site)..."
-  python3 -m pip install --user --upgrade pip setuptools wheel || true
-  if python3 -m pip install --user --upgrade picamera2; then
-    echo "   Installed Picamera2 via pip."
-  else
-    echo "WARNING: Picamera2 pip install failed. On older OS releases, consider upgrading to Raspberry Pi OS Bookworm."
-  fi
-fi
+# Minimal extras
+apt_install_one python3-pip
+apt_install_one python3-smbus
+apt_install_one python3-smbus2
+apt_install_one qtwayland5
+apt_install_one git
 
-echo "==> Installing smbus2 (APT or pip fallback)..."
-if ! apt_install_one python3-smbus2; then
-  echo "   APT python3-smbus2 not available; trying pip (user site)..."
-  python3 -m pip install --user --upgrade smbus2 || echo "WARNING: smbus2 pip install failed."
-fi
+# Camera apps for rpicam-hello (try new then old package name)
+apt_install_one rpicam-apps
+apt_install_one libcamera-apps
 
-echo "==> Optional: install camera test apps (rpicam-apps/libcamera-apps)..."
-if ! apt_install_one rpicam-apps; then
-  echo "   rpicam-apps not available; trying libcamera-apps..."
-  apt_install_one libcamera-apps || echo "NOTICE: Skipping camera test binaries (you can still use Picamera2)."
-fi
-
-echo "==> Enabling I2C (if raspi-config exists)..."
+# Enable I2C if possible
+echo "==> Enabling I2C (raspi-config if available)..."
 if have_cmd raspi-config; then
   sudo raspi-config nonint do_i2c 0 || echo "NOTE: raspi-config I2C enable returned non-zero (continuing)."
 else
@@ -127,10 +112,17 @@ if [[ ! -e /dev/i2c-1 ]]; then
   REBOOT_NEEDED=1
 fi
 
-echo "==> Installing PCA9685 Python libraries (user site via pip)..."
+# Python user-site installs
+echo "==> Ensuring pip is available..."
+if ! python3 -m pip -V >/dev/null 2>&1; then
+  echo "pip not available yet; attempting to install python3-pip via apt."
+  apt_install_one python3-pip
+fi
+
+echo "==> Installing PCA9685 Python libraries (user site)..."
+python3 -m pip install --user --upgrade pip || echo "WARNING: pip self-upgrade failed (continuing)."
 python3 -m pip install --user --upgrade adafruit-circuitpython-pca9685 adafruit-blinka || echo "WARNING: CircuitPython PCA9685 install failed."
-# Legacy package (optional)
-python3 -m pip install --user --upgrade Adafruit-PCA9685 || echo "NOTE: Legacy Adafruit-PCA9685 install failed (not required)."
+python3 -m pip install --user --upgrade Adafruit-PCA9685 || echo "WARNING: Legacy Adafruit-PCA9685 install failed."
 
 # PATH hint for user-site scripts
 USER_BASE=$(python3 -m site --user-base 2>/dev/null || echo "$HOME/.local")
@@ -142,31 +134,18 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "  export PATH=\"$BIN_DIR:\$PATH\""
 fi
 
-# Quick Picamera2 verification
-echo
-echo "==> Verifying Picamera2 import..."
-python3 - <<'PYCHECK' || true
-try:
-    import picamera2  # noqa: F401
-    print("Picamera2 import OK.")
-except Exception as e:
-    print("Picamera2 NOT available:", e)
-    print("TIP: On older Raspberry Pi OS (buster/bullseye), upgrade to Bookworm or build Picamera2 from source.")
-PYCHECK
-
-# Report failures
 if (( ${#FAILED_PKGS[@]} )); then
   echo
   echo "The following APT packages could not be installed:"
   printf '  - %s\n' "${FAILED_PKGS[@]}"
-  echo "Some were replaced by pip or are optional."
+  echo "This may happen if you're not on Raspberry Pi OS or APT sources are missing."
 fi
 
 if (( ${#DISABLED_CORAL_FILES[@]} )); then
   echo
   echo "Temporarily disabled Coral/EdgeTPU APT entries in:"
   printf '  - %s\n' "${DISABLED_CORAL_FILES[@]}"
-  echo "Backups (if created) have .bak suffix."
+  echo "Backups (if created) have .bak suffix. You can re-enable by restoring the file or uncommenting lines."
 fi
 
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
@@ -174,25 +153,12 @@ if [[ $REBOOT_NEEDED -eq 1 ]]; then
   echo "Reboot recommended so I2C and group changes take effect."
 fi
 
-echo
-echo "Install done."
-echo "Test camera quickly with Picamera2 (if preview display available):"
-cat <<'PY'
-python3 - <<'EOF'
-from picamera2 import Picamera2
-from time import sleep
-picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={'size': (640, 480)}))
-picam2.start()
-print('Preview started. Ctrl+C to stop.')
-try:
-    while True: sleep(1)
-except KeyboardInterrupt:
-    pass
-picam2.stop()
-EOF
-PY
-
-echo
-echo "Then run your scripts, e.g.:"
-echo "  python3 scripts/drive_train_autopilot_picam2.py"
+echo "Install done. Test the camera with: rpicam-hello -t 0"
+echo "Then run scripts"
+echo "  - Run camera testing scripts, e.g.: python3 test_res_fps_qt.py"
+echo "  - Run camera inspector with preview:"
+echo "      python3 camera_inspector.py --preview"
+echo "  - Run line follower with preview (example black line):"
+echo "      python3 line_follower_console.py --mode black --preview"
+echo "  - Run keyboard control (ensure terminal focus):"
+echo "      python3 tt02_keyboard_drive.py"
