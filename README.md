@@ -6,9 +6,11 @@ https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
 
 ### setup virtual env
+```bash
 python3 -m virtualenv -p python3 env --system-site-packages
 echo "source ~/env/bin/activate" >> ~/.bashrc
 source ~/.bashrc
+```
 
 ### install tensorflow
 for Python 3.7.3 on Raspbian Buster. 
