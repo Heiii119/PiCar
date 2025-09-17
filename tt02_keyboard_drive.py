@@ -33,7 +33,7 @@ import signal
 # User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR   = 0x40
-I2C_BUSNUM         = None   # None for default (usually 1)
+I2C_BUSNUM         = 1   # None for default (usually 1)
 
 PCA9685_FREQUENCY  = 60     # 50–60 Hz typical for servo/ESC
 
@@ -57,6 +57,9 @@ SWITCH_PAUSE_S = 0.06
 # ==========================
 try:
     import Adafruit_PCA9685 as LegacyPCA9685
+    I2C_BUSNUM = 1
+    pwm_driver = LegacyPCA9685.PCA9685(address=0x40, busnum=I2C_BUSNUM)
+    pwm_driver.set_pwm_freq(60)
 except ImportError:
     sys.exit("Missing Adafruit-PCA9685. Activate your venv and run: pip install Adafruit-PCA9685")
 
@@ -68,6 +71,9 @@ def clamp12(x):
 
 class PWM:
     def __init__(self, address, busnum, freq_hz):
+        # Force bus selection to avoid auto-detect issues
+        self.dev = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
+        self.dev.set_pwm_freq(freq_hz)
         if busnum is None:
             self.dev = LegacyPCA9685.PCA9685(address=address)
         else:
