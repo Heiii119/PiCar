@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Picamera2 preview + keyboard control for TT02 RC car via Adafruit PCA9685 (CircuitPython).
-# Smooth steering/throttle via ramping in a fixed-rate actuator loop, with robust cleanup.
+# Smooth steering/throttle via ramping in a fixed-rate actuator loop, with robust cleanup and live telemetry.
 # - Drive with arrow keys or WASD.
 # - Space: immediate throttle stop
 # - c: center steering
@@ -20,7 +20,7 @@ from picamera2 import Picamera2, Preview
 # User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR  = 0x40
-PCA9685_FREQUENCY = 50     # 50 Hz is standard for RC servo/ESC pulses
+PCA9685_FREQUENCY = 60     # 60 Hz for TT02 preference
 
 # Channels
 THROTTLE_CHANNEL = 0
@@ -39,10 +39,13 @@ THROTTLE_FWD_MAX_US = 2000
 THROTTLE_REV_MAX_US = 1000
 
 # Ramping and update rate (smoothness)
-ACTUATOR_HZ   = 200        # actuator update loop frequency
-STEER_STEP_US = 10         # max change per cycle (µs)
-THR_STEP_US   = 6          # smaller for traction
-KEY_POLL_SLEEP = 0.01      # main loop sleep to reduce CPU
+ACTUATOR_HZ    = 200        # actuator update loop frequency
+STEER_STEP_US  = 10         # max change per cycle (µs)
+THR_STEP_US    = 6          # smaller for traction
+KEY_POLL_SLEEP = 0.01       # main loop sleep to reduce CPU
+
+# Telemetry (console output) rate limit
+TELEM_HZ = 10               # print telemetry at 10 Hz max
 
 # Camera
 FRAME_WIDTH  = 640
@@ -76,7 +79,9 @@ class PWM:
         self.dev.frequency = freq_hz
 
     def set_us(self, channel, pulse_us):
-        self.dev.channels[channel].duty_cycle = us_to_duty_cycle(pulse_us, self.dev.frequency)
+        dc = us_to_duty_cycle(pulse_us, self.dev.frequency)
+        self.dev.channels[channel].duty_cycle = dc
+        return dc  # return duty for telemetry
 
 # ==========================
 # Keyboard (non-blocking)
@@ -144,6 +149,9 @@ class DriveState:
         # Actual outputs (ramped) in microseconds
         self.out_steer_us       = STEER_CENTER_US
         self.out_throttle_us    = THROTTLE_NEUTRAL_US
+        # Last written duty cycles (for telemetry)
+        self.last_steer_dc      = us_to_duty_cycle(STEER_CENTER_US, PCA9685_FREQUENCY)
+        self.last_thr_dc        = us_to_duty_cycle(THROTTLE_NEUTRAL_US, PCA9685_FREQUENCY)
         # Threading
         self.lock = threading.Lock()
         self.alive = True
@@ -152,6 +160,8 @@ class DriveState:
         self.picam2 = None
         self.pwm = None
         self.actuator_thread = None
+        # Telemetry timing
+        self._last_telem = 0.0
 
     def set_steer_norm(self, norm):
         us = STEER_CENTER_US + clamp(norm, -1.0, 1.0) * (STEER_MAX_US - STEER_CENTER_US)
@@ -173,11 +183,12 @@ class DriveState:
             self.target_steer_us = STEER_CENTER_US
 
 # ==========================
-# Actuator thread (smooth ramping)
+# Actuator thread (smooth ramping + telemetry)
 # ==========================
 def actuator_loop(state: DriveState):
     pwm = state.pwm
     dt = 1.0 / ACTUATOR_HZ
+    telem_dt = 1.0 / TELEM_HZ
     while state.alive:
         with state.lock:
             # Ramp steering
@@ -190,15 +201,32 @@ def actuator_loop(state: DriveState):
                 state.out_throttle_us = min(state.out_throttle_us + THR_STEP_US, state.target_throttle_us)
             else:
                 state.out_throttle_us = max(state.out_throttle_us - THR_STEP_US, state.target_throttle_us)
-            steer_out = state.out_steer_us
-            thr_out   = state.out_throttle_us
+            steer_out_us = state.out_steer_us
+            thr_out_us   = state.out_throttle_us
+
         # Write to hardware outside the lock
         try:
-            pwm.set_us(STEERING_CHANNEL, steer_out)
-            pwm.set_us(THROTTLE_CHANNEL, thr_out)
+            steer_dc = pwm.set_us(STEERING_CHANNEL, steer_out_us)
+            thr_dc   = pwm.set_us(THROTTLE_CHANNEL, thr_out_us)
+            state.last_steer_dc = steer_dc
+            state.last_thr_dc   = thr_dc
         except Exception:
             # On transient I2C error, continue trying
             pass
+
+        # Telemetry output (rate-limited)
+        now = time.monotonic()
+        if now - state._last_telem >= telem_dt:
+            state._last_telem = now
+            with state.lock:
+                print(
+                    f"[PWM @ {pwm.dev.frequency}Hz] "
+                    f"Steer tgt/out: {state.target_steer_us:.0f}/{steer_out_us:.0f} us "
+                    f"(dc={state.last_steer_dc}) | "
+                    f"Thr tgt/out: {state.target_throttle_us:.0f}/{thr_out_us:.0f} us "
+                    f"(dc={state.last_thr_dc})"
+                )
+
         time.sleep(dt)
 
 # ==========================
@@ -236,7 +264,6 @@ def stop_camera(state: DriveState):
         pass
 
 def on_exit(state: DriveState):
-    # Guard against double cleanup
     if getattr(state, "_cleanup_done", False):
         return
     state._cleanup_done = True
