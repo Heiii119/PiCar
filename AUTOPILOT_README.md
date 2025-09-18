@@ -1,5 +1,4 @@
 # Autopilot (PilotNet) module
-
 This workspace includes `autopilot_pilotnet.py` — a self-contained module that reuses
 camera and motor helpers from `drive_train_autopilot_picam2.py` and provides:
 
@@ -8,6 +7,22 @@ camera and motor helpers from `drive_train_autopilot_picam2.py` and provides:
 - Training harness that saves a Keras `.h5` model
 - Optional TFLite export for on-device inference
 - `run_autopilot` loop with keyboard override
+
+## tensorflow installation
+```bash
+uname -m 
+```
+If uname -m prints aarch64, proceed with the TensorFlow install steps I shared:
+```bash
+sudo apt update && sudo apt install -y libatlas-base-dev libhdf5-dev libblas-dev liblapack-dev gfortran
+python3 -m venv ~/tf-venv && source ~/tf-venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel packaging
+pip cache purge
+pip install "Send2Trash>=1.8.2"
+pip install --no-cache-dir tensorflow-aarch64
+python -c "import tensorflow as tf; print(tf.version); print(tf.config.list_physical_devices('CPU'))"
+```
+
 
 Quick examples (PowerShell)
 
