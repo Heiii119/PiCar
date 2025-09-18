@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # install.sh — TT02 + Picamera2 setup (PiCam only; disables Coral/EdgeTPU APT repos)
+# Ensures Debian ABI-aligned camera stack:
+#   python3-picamera2 python3-numpy python3-simplejpeg (and friends)
 # Keeps original packages:
 #   python3-picamera2 python3-pyqt5 i2c-tools python3-numpy python3-pil
 # Adds minimal extras:
@@ -68,23 +70,32 @@ if ! sudo apt-get update; then
   fi
 fi
 
-# Core and extras (system-wide)
-apt_install_one python3-picamera2
-apt_install_one python3-pyqt5
-apt_install_one i2c-tools
+# Core camera stack (force install to ensure ABI-aligned builds)
 apt_install_one python3-numpy
-apt_install_one python3-pil
+apt_install_one python3-simplejpeg
+apt_install_one python3-picamera2
 
-# Minimal extras
-apt_install_one python3-pip
+# GUI support for Picamera2 preview (QT)
+apt_install_one python3-pyqt5
+apt_install_one qtwayland5
+
+# I2C + utils
+apt_install_one i2c-tools
 apt_install_one python3-smbus
 apt_install_one python3-smbus2
-apt_install_one qtwayland5
+
+# Imaging utils
+apt_install_one python3-pil
+
+# General tools
+apt_install_one python3-pip
 apt_install_one git
 
 # Venv support and full Python (headers etc.)
 apt_install_one python3-venv
 apt_install_one python3-full
+apt_install_one build-essential
+apt_install_one libjpeg-dev
 
 # Camera apps for rpicam-hello (try new then old package name)
 apt_install_one rpicam-apps
@@ -136,6 +147,33 @@ pip install --no-cache-dir adafruit-circuitpython-pca9685 adafruit-blinka Adafru
 
 deactivate || true
 
+# Post-install verification (system Python, ABI alignment)
+echo "==> Verifying Picamera2 stack (system Python) ..."
+SYS_PY="$(command -v python3 || echo /usr/bin/python3)"
+echo "Using: $SYS_PY"
+"$SYS_PY" - <<'PY'
+import sys
+print("Python:", sys.version)
+def try_import(name):
+    try:
+        __import__(name)
+        print(f"OK: import {name}")
+        return True
+    except Exception as e:
+        print(f"FAIL: import {name} -> {e}")
+        return False
+ok_np = try_import("numpy")
+ok_sj = try_import("simplejpeg")
+if ok_np and ok_sj:
+    try:
+        from picamera2 import Picamera2, Preview  # noqa: F401
+        print("OK: import picamera2")
+    except Exception as e:
+        print(f"FAIL: import picamera2 -> {e}")
+else:
+    print("Skipping picamera2 import test because prerequisites failed.")
+PY
+
 # PATH hint for user-site scripts (not strictly required now, but helpful if user-site tools get used)
 USER_BASE=$(python3 -m site --user-base 2>/dev/null || echo "$HOME/.local")
 BIN_DIR="$USER_BASE/bin"
@@ -169,9 +207,6 @@ echo "Install done. Test the camera with: rpicam-hello -t 0"
 echo "Then run scripts"
 echo "  - Activate venv: source ~/tt02-venv/bin/activate"
 echo "  - Run camera testing scripts, e.g.: python3 test_res_fps_qt.py"
-echo "  - Run camera inspector with preview:"
-echo "      python3 camera_inspector.py --preview"
-echo "  - Run line follower with preview (example black line):"
-echo "      python3 line_follower_console.py --mode black --preview"
-echo "  - Run keyboard control (ensure terminal focus):"
-echo "      python3 tt02_keyboard_drive.py"
+echo "  - Run camera inspector with preview: python3 camera_inspector.py --preview"
+echo "  - Run line follower with preview (example black line): python3 line_follower_console.py --mode black --preview"
+echo "  - Run keyboard control (ensure terminal focus): python3 tt02_keyboard_drive.py"
