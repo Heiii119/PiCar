@@ -20,12 +20,18 @@
 # Requirements:
 #   - pip install Adafruit-PCA9685 opencv-python
 #   - I2C enabled; PCA9685 on I2C bus 1 at address 0x40
+#!/usr/bin/env python3
+# TT02 Remote-drive server with embedded HTML UI
+# - Serves UI at / and /index.html
+# - Command POSTs at /cmd?c=...
+# - Preview toggle at /preview/toggle
+# - Health at /health
+# - Listens on 0.0.0.0:6666 by default
 
 import sys
 import time
 import threading
 import socket
-import socketserver
 import queue
 import signal
 import termios
@@ -164,7 +170,6 @@ class PreviewManager:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.stop()
                 break
-        # Close window gracefully after loop
         try:
             cv2.destroyWindow(self.title)
         except Exception:
@@ -182,7 +187,7 @@ class PreviewManager:
 # ==========================
 # Networking: simple HTTP + command POST
 # ==========================
-HOST = "192.168.50.149"   # Change to the interface IP if needed
+HOST = "0.0.0.0"  # Listen on all interfaces
 PORT = 6666
 
 car = CarController()
@@ -226,7 +231,8 @@ button { font-size: 18px; padding: 12px; }
 </div>
 
 <script>
-const send = (cmd) => fetch('/cmd?c=' + encodeURIComponent(cmd), {method:'POST'});
+const base = '';
+const send = (cmd) => fetch(base + '/cmd?c=' + encodeURIComponent(cmd), {method:'POST'});
 
 const holdBehavior = (id, pressCmd, releaseCmd) => {
   const el = document.getElementById(id);
@@ -245,7 +251,7 @@ const holdBehavior = (id, pressCmd, releaseCmd) => {
 };
 
 document.getElementById('previewBtn').addEventListener('click', async () => {
-  const r = await fetch('/preview/toggle', {method:'POST'});
+  const r = await fetch(base + '/preview/toggle', {method:'POST'});
   const t = await r.text();
   document.getElementById('previewBtn').innerText = t.includes('running') ? 'Stop Preview' : 'Start Preview';
 });
@@ -263,10 +269,14 @@ holdBehavior('right', 'STEER RIGHT', 'STEER CENTER');
 """
 
 class RequestHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def do_GET(self):
         path = urlparse(self.path).path
-        if path == '/':
+        if path in ('/', '/index.html'):
             self._send_html(HTML_PAGE)
+        elif path == '/health':
+            self._send_text('ok')
         else:
             self._send_text("Not found", code=404)
 
@@ -318,6 +328,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -326,12 +337,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
     def log_message(self, fmt, *args):
-        # quieter server logs
-        return
+        return  # quieter
 
 # ==========================
 # Local keyboard UI (optional)
@@ -351,120 +362,4 @@ class KB:
         while select.select([sys.stdin], [], [], 0)[0]:
             ch = sys.stdin.read(1)
             if ch == '\x1b':
-                time.sleep(0.001)
-                seq = ch
-                while select.select([sys.stdin], [], [], 0)[0]:
-                    seq += sys.stdin.read(1)
-                keys.append(seq)
-            else:
-                keys.append(ch)
-        return keys
-
-def decode_key(ch):
-    if ch in ('w','W','\x1b[A'):
-        return 'UP'
-    if ch in ('s','S','\x1b[B'):
-        return 'DOWN'
-    if ch in ('a','A','\x1b[D'):
-        return 'LEFT'
-    if ch in ('d','D','\x1b[C'):
-        return 'RIGHT'
-    if ch == ' ':
-        return 'SPACE'
-    if ch in ('c','C'):
-        return 'CENTER'
-    if ch in ('q','Q','\x03'):
-        return 'QUIT'
-    return None
-
-def print_controls():
-    print("# Control TT02 RC car over network or locally.")
-    print("# Buttons on / page control throttle/steering.")
-    print("# - Up:     throttle forward")
-    print("# - Down:   throttle reverse")
-    print("# - Left:   steer left")
-    print("# - Right:  steer right")
-    print("# - Space:  throttle stop")
-    print("# - c:      center steering")
-    print("# - q:      quit (safely stops and centers)")
-    print()
-
-# ==========================
-# Main server runner
-# ==========================
-def run_server():
-    server = HTTPServer((HOST, PORT), RequestHandler)
-    print(f"Server running at http://{HOST}:{PORT}/")
-    print("Open this URL on your phone (same Wi‑Fi).")
-    return server
-
-def main():
-    print_controls()
-    # Safe exit on Ctrl-C
-    def on_sigint(signum, frame):
-        try:
-            car.neutral_all()
-            preview.stop()
-            time.sleep(0.1)
-        finally:
-            print("\nExiting safely.")
-            try:
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
-            sys.exit(0)
-    signal.signal(signal.SIGINT, on_sigint)
-
-    server = run_server()
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-
-    # Local keyboard control (optional convenience)
-    print("Local keys active in this terminal. Visit the URL for phone control.")
-    print("Press 'q' or Ctrl-C to quit.")
-    with KB() as kb:
-        while True:
-            # Handle local keyboard
-            for raw in kb.poll_all():
-                k = decode_key(raw)
-                if k == 'UP':
-                    car.throttle_forward()
-                elif k == 'DOWN':
-                    car.throttle_reverse()
-                elif k == 'LEFT':
-                    car.steer_left()
-                elif k == 'RIGHT':
-                    car.steer_right()
-                elif k == 'SPACE':
-                    car.throttle_stop()
-                elif k == 'CENTER':
-                    car.steer_center()
-                elif k == 'QUIT':
-                    car.neutral_all()
-                    preview.stop()
-                    server.shutdown()
-                    return
-            # Auto-return to STOP/CENTER when no keys are currently pressed locally.
-            # For network side we already expect the phone UI to send release commands.
-            # Here, implement a light "decay" back to neutral each loop.
-            car.throttle_stop()
-            car.steer_center()
-
-            # Keep GUI camera window alive if running
-            if preview.running:
-                # cv2 window is fed by its own thread; nothing to do here
-                pass
-
-            time.sleep(0.05)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except OSError as e:
-        print(f"Socket error: {e}")
-        print("Tip: If binding fails, ensure HOST matches your device IP or use 0.0.0.0 to listen on all interfaces.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}")
-        print("Tip: Ensure I2C is enabled and required packages are installed.")
-        sys.exit(1)
+               
