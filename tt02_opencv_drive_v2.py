@@ -47,8 +47,8 @@ def us_to_12bit(us, freq=PCA9685_FREQUENCY):
 # THROTTLE endpoints mapped to ~1000/1500/2000 µs (works with most ESCs)
 THROTTLE_CHANNEL       = 0
 THROTTLE_REVERSE_PWM   = us_to_12bit(1200)  # ≈ 246
-THROTTLE_STOPPED_PWM   = us_to_12bit(1800)  # ≈ 369
-THROTTLE_FORWARD_PWM   = us_to_12bit(2400)  # ≈ 409
+THROTTLE_STOPPED_PWM   = us_to_12bit(1500)  # ≈ 304
+THROTTLE_FORWARD_PWM   = us_to_12bit(1800)  # ≈ 369
 
 # STEERING endpoints (tune for your servo; avoid mechanical binding)
 STEERING_CHANNEL     = 1
