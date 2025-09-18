@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Picamera2 preview + keyboard control for TT02 RC car via Adafruit PCA9685 (CircuitPython).
-# Uses user-provided 12-bit PWM values (0..4095), PCA9685 at 50 Hz, and shows a live status board.
-# Smooth ramping is applied in 12-bit units; direction changes pass through STOP with a safety pause.
+# TT02 RC car control via Adafruit PCA9685 (CircuitPython) + Picamera2 preview.
+# - Uses microsecond pulses at 50 Hz (standard RC) for both ESC and servo.
+# - Smooth ramping + STOP-pass safety when changing direction.
+# - Single-line status HUD refreshes in place (no console spam).
+# - Drive with arrow keys / WASD; Space=stop, c=center, q=quit.
 
 import sys
 import time
@@ -17,33 +19,35 @@ from picamera2 import Picamera2, Preview
 # User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR  = 0x40
-PCA9685_FREQUENCY = 50   # per your request
+PCA9685_FREQUENCY = 50      # Standard RC pulse frequency
 
-# PCA9685 channels
+# Channels
 THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
 
-# PWM values (0..4095). Provided by user
-THROTTLE_FORWARD_PWM  = 420
-THROTTLE_STOPPED_PWM  = 370
-THROTTLE_REVERSE_PWM  = 250
+# ESC endpoints (microseconds) — adjust if your ESC needs different values
+THROTTLE_REV_US   = 1000    # full reverse
+THROTTLE_NEUTRAL  = 1500    # neutral/stop
+THROTTLE_FWD_US   = 2000    # full forward
 
-STEERING_LEFT_PWM     = 470
-STEERING_RIGHT_PWM    = 270
+# Steering endpoints (microseconds) — tune to avoid binding
+STEER_LEFT_US   = 1800
+STEER_CENTER_US = 1500
+STEER_RIGHT_US  = 1200
 
 # Safety delay passing through STOP when changing direction
 SWITCH_PAUSE_S = 0.06
 
+# Smoothness and UI
+ACTUATOR_HZ    = 200        # actuator update loop frequency
+STEER_STEP_US  = 10         # per-cycle µs change for steering
+THR_STEP_US    = 6          # per-cycle µs change for throttle
+KEY_POLL_SLEEP = 0.01       # main loop tick
+HUD_HZ         = 12         # HUD refresh rate (in-place)
+
 # Camera settings
 FRAME_WIDTH  = 640
 FRAME_HEIGHT = 480
-
-# Smoothness and telemetry
-ACTUATOR_HZ    = 200      # actuator update frequency
-STEER_STEP_12  = 2        # 12-bit ticks per cycle for steering ramp
-THR_STEP_12    = 2        # 12-bit ticks per cycle for throttle ramp
-KEY_POLL_SLEEP = 0.01     # main loop tick
-TELEM_HZ       = 10       # status board refresh rate
 
 # ==========================
 # CircuitPython PCA9685 init
@@ -59,30 +63,23 @@ except Exception as e:
         f"Import error: {e}"
     )
 
-def clamp(x, lo, hi):
-    return max(lo, min(hi, x))
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-def to16_from12(v12):
-    v12 = clamp(int(v12), 0, 4095)
-    return int(round(v12 * 65535 / 4095))
+def us_to_dc16(us, freq=PCA9685_FREQUENCY):
+    # Convert microseconds to PCA9685 16-bit duty at given freq
+    period_us = 1_000_000.0 / freq
+    return int(clamp(round((us / period_us) * 65535.0), 0, 65535))
 
-def steering_center_pwm():
-    return int(round((STEERING_LEFT_PWM + STEERING_RIGHT_PWM) / 2.0))
-
-# ==========================
-# PCA9685 wrapper
-# ==========================
 class PWMDev:
     def __init__(self, address, freq_hz):
         i2c = busio.I2C(board.SCL, board.SDA)
         self.dev = PCA9685(i2c, address=address)
         self.dev.frequency = freq_hz
-
-    def set12(self, ch, value_12):
-        v12 = clamp(int(value_12), 0, 4095)
-        v16 = to16_from12(v12)
-        self.dev.channels[ch].duty_cycle = v16
-        return v12, v16
+    def set_us(self, ch, pulse_us):
+        dc = us_to_dc16(pulse_us, self.dev.frequency)
+        self.dev.channels[ch].duty_cycle = dc
+        return dc
 
 # ==========================
 # Keyboard non-blocking
@@ -135,21 +132,21 @@ def print_controls():
 # ==========================
 class DriveState:
     def __init__(self):
-        # Targets and outputs in 12-bit PWM units
-        self.target_thr_12 = THROTTLE_STOPPED_PWM
-        self.target_str_12 = steering_center_pwm()
-        self.out_thr_12    = THROTTLE_STOPPED_PWM
-        self.out_str_12    = steering_center_pwm()
+        # Targets and outputs in microseconds
+        self.target_thr_us = THROTTLE_NEUTRAL
+        self.target_str_us = STEER_CENTER_US
+        self.out_thr_us    = THROTTLE_NEUTRAL
+        self.out_str_us    = STEER_CENTER_US
 
-        # Last set raw duty values (16-bit)
-        self.last_thr_dc16 = to16_from12(self.out_thr_12)
-        self.last_str_dc16 = to16_from12(self.out_str_12)
+        # Last written duty cycles (16-bit)
+        self.last_thr_dc16 = us_to_dc16(self.out_thr_us)
+        self.last_str_dc16 = us_to_dc16(self.out_str_us)
 
-        # For direction change safety handling
-        self.last_command = "STOP"   # "FWD", "REV", "STOP"
+        # Direction change safety
+        self.last_cmd = "STOP"          # "FWD","REV","STOP"
         self.switch_block_until = 0.0
 
-        # Threading and resources
+        # Threads/resources
         self.lock = threading.Lock()
         self.alive = True
         self._cleanup_done = False
@@ -157,96 +154,99 @@ class DriveState:
         self.picam2 = None
         self.actuator_thread = None
 
-        # Telemetry
-        self._last_telem = 0.0
+        # HUD timing
+        self._last_hud = 0.0
 
-    def set_throttle_cmd(self, cmd):  # "FWD", "REV", "STOP"
+    def set_throttle_cmd(self, cmd):  # "FWD","REV","STOP"
         now = time.monotonic()
         with self.lock:
-            # Direction change logic: enforce pass through STOP with pause
             if cmd == "FWD":
-                if self.last_command == "REV" and now < self.switch_block_until:
-                    # still in block; ignore to protect gearbox/ESC
-                    return
-                if self.last_command == "REV":
-                    # initiate block
-                    self.target_thr_12 = THROTTLE_STOPPED_PWM
+                if self.last_cmd == "REV":
+                    if now < self.switch_block_until:
+                        return
+                    # enforce stop first
+                    self.target_thr_us = THROTTLE_NEUTRAL
                     self.switch_block_until = now + SWITCH_PAUSE_S
-                    self.last_command = "STOP"
+                    self.last_cmd = "STOP"
                     return
-                self.target_thr_12 = THROTTLE_FORWARD_PWM
-                self.last_command = "FWD"
+                self.target_thr_us = THROTTLE_FWD_US
+                self.last_cmd = "FWD"
             elif cmd == "REV":
-                if self.last_command == "FWD" and now < self.switch_block_until:
-                    return
-                if self.last_command == "FWD":
-                    self.target_thr_12 = THROTTLE_STOPPED_PWM
+                if self.last_cmd == "FWD":
+                    if now < self.switch_block_until:
+                        return
+                    self.target_thr_us = THROTTLE_NEUTRAL
                     self.switch_block_until = now + SWITCH_PAUSE_S
-                    self.last_command = "STOP"
+                    self.last_cmd = "STOP"
                     return
-                self.target_thr_12 = THROTTLE_REVERSE_PWM
-                self.last_command = "REV"
+                self.target_thr_us = THROTTLE_REV_US
+                self.last_cmd = "REV"
             else:
-                self.target_thr_12 = THROTTLE_STOPPED_PWM
-                self.last_command = "STOP"
+                self.target_thr_us = THROTTLE_NEUTRAL
+                self.last_cmd = "STOP"
 
-    def set_steer_cmd(self, cmd):  # "LEFT", "RIGHT", "CENTER"
+    def set_steer_cmd(self, cmd):  # "LEFT","RIGHT","CENTER"
         with self.lock:
             if cmd == "LEFT":
-                self.target_str_12 = STEERING_LEFT_PWM
+                self.target_str_us = STEER_LEFT_US
             elif cmd == "RIGHT":
-                self.target_str_12 = STEERING_RIGHT_PWM
+                self.target_str_us = STEER_RIGHT_US
             else:
-                self.target_str_12 = steering_center_pwm()
+                self.target_str_us = STEER_CENTER_US
 
 # ==========================
-# Actuator thread (ramping + status board)
+# Actuator thread (ramping + HUD)
 # ==========================
 def actuator_loop(state: DriveState):
     pwm = state.pwm
     dt = 1.0 / ACTUATOR_HZ
-    telem_dt = 1.0 / TELEM_HZ
+    hud_dt = 1.0 / HUD_HZ
+
+    # Prepare HUD line (we’ll overwrite it)
+    print()  # reserve one line for HUD
 
     while state.alive:
         # Ramp toward targets
         with state.lock:
-            # throttle
-            if state.target_thr_12 > state.out_thr_12:
-                state.out_thr_12 = min(state.out_thr_12 + THR_STEP_12, state.target_thr_12)
+            # Throttle
+            if state.target_thr_us > state.out_thr_us:
+                state.out_thr_us = min(state.out_thr_us + THR_STEP_US, state.target_thr_us)
             else:
-                state.out_thr_12 = max(state.out_thr_12 - THR_STEP_12, state.target_thr_12)
-            # steering
-            if state.target_str_12 > state.out_str_12:
-                state.out_str_12 = min(state.out_str_12 + STEER_STEP_12, state.target_str_12)
+                state.out_thr_us = max(state.out_thr_us - THR_STEP_US, state.target_thr_us)
+            # Steering
+            if state.target_str_us > state.out_str_us:
+                state.out_str_us = min(state.out_str_us + STEER_STEP_US, state.target_str_us)
             else:
-                state.out_str_12 = max(state.out_str_12 - STEER_STEP_12, state.target_str_12)
+                state.out_str_us = max(state.out_str_us - STEER_STEP_US, state.target_str_us)
 
-            out_thr = state.out_thr_12
-            out_str = state.out_str_12
+            thr_out = state.out_thr_us
+            str_out = state.out_str_us
 
         # Write to hardware
         try:
-            _, thr_dc16 = pwm.set12(THROTTLE_CHANNEL, out_thr)
-            _, str_dc16 = pwm.set12(STEERING_CHANNEL, out_str)
-            state.last_thr_dc16 = thr_dc16
-            state.last_str_dc16 = str_dc16
+            thr_dc = pwm.set_us(THROTTLE_CHANNEL, thr_out)
+            str_dc = pwm.set_us(STEERING_CHANNEL, str_out)
+            state.last_thr_dc16 = thr_dc
+            state.last_str_dc16 = str_dc
         except Exception:
+            # keep trying on next loop if transient I2C error
             pass
 
-        # Status board (single refreshing line)
+        # In-place HUD refresh (one line, no scrolling)
         now = time.monotonic()
-        if now - state._last_telem >= telem_dt:
-            state._last_telem = now
+        if now - state._last_hud >= hud_dt:
+            state._last_hud = now
             with state.lock:
-                status = (
+                dir_wait = (now < state.switch_block_until)
+                hud = (
                     f"[PCA9685 {pwm.dev.frequency}Hz | THR ch{THROTTLE_CHANNEL} | STR ch{STEERING_CHANNEL}] "
-                    f"THR tgt/out: {state.target_thr_12}/{out_thr} (dc16={state.last_thr_dc16}) "
-                    f"cmd={state.last_command} "
-                    f"{'(dir-wait)' if now < state.switch_block_until else ''} | "
-                    f"STR tgt/out: {state.target_str_12}/{out_str} (dc16={state.last_str_dc16})"
+                    f"THR tgt/out: {state.target_thr_us:.0f}/{thr_out:.0f}us (dc16={state.last_thr_dc16}) "
+                    f"cmd={state.last_cmd}{' (dir-wait)' if dir_wait else ''} | "
+                    f"STR tgt/out: {state.target_str_us:.0f}/{str_out:.0f}us (dc16={state.last_str_dc16})"
                 )
-            # Print as a carriage-returned HUD
-            print("\r" + status + " " * max(0, 10 - len(status) % 10), end="", flush=True)
+            # Clear line, print, and return carriage
+            sys.stdout.write("\r\033[2K" + hud)
+            sys.stdout.flush()
 
         time.sleep(dt)
 
@@ -258,8 +258,8 @@ def safe_neutral(state: DriveState):
         return
     for _ in range(3):
         try:
-            state.pwm.set12(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-            state.pwm.set12(STEERING_CHANNEL, steering_center_pwm())
+            state.pwm.set_us(THROTTLE_CHANNEL, THROTTLE_NEUTRAL)
+            state.pwm.set_us(STEERING_CHANNEL, STEER_CENTER_US)
         except Exception:
             pass
         time.sleep(0.05)
@@ -285,15 +285,16 @@ def on_exit(state: DriveState):
     state._cleanup_done = True
     try:
         with state.lock:
-            state.target_thr_12 = THROTTLE_STOPPED_PWM
-            state.target_str_12 = steering_center_pwm()
-            state.last_command = "STOP"
+            state.target_thr_us = THROTTLE_NEUTRAL
+            state.target_str_us = STEER_CENTER_US
+            state.last_cmd = "STOP"
         safe_neutral(state)
     finally:
         try: shutdown_actuator(state)
         except Exception: pass
         try: stop_camera(state)
         except Exception: pass
+        # Move to next line so shell prompt isn't on HUD line
         print("\nExited.")
 
 # ==========================
@@ -304,6 +305,7 @@ def main():
     state = DriveState()
     pwm = PWMDev(PCA9685_I2C_ADDR, PCA9685_FREQUENCY)
     state.pwm = pwm
+    # Put ESC at neutral before it powers up if possible (arm)
     safe_neutral(state)
 
     # Camera setup
@@ -330,7 +332,6 @@ def main():
     print("Driving active. Press 'q' to quit.")
 
     def sig_exit(signum, frame):
-        print("\nExiting safely (signal).")
         on_exit(state)
         sys.exit(0)
     signal.signal(signal.SIGINT, sig_exit)
