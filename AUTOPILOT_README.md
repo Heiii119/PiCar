@@ -27,25 +27,25 @@ python -c "import tensorflow as tf; print(tf.version); print(tf.config.list_phys
 Quick examples (PowerShell)
 
 Record a session using the existing tool in the repo (from the main script):
-
+```bash
 python .\drive_train_autopilot_picam2.py
-
+```
 Train a PilotNet model on a recorded session (replace session folder):
-
+```bash
 python .\autopilot_pilotnet.py train data\session_YYYYMMDD_HHMMSS --epochs 25 --batch 32
-
+```
 Train and export TFLite:
-
+```bash
 python .\autopilot_pilotnet.py train data\session_YYYYMMDD_HHMMSS --tflite
-
+```
 Run autopilot using the Keras model:
-
+```bash
 python .\autopilot_pilotnet.py run data\session_YYYYMMDD_HHMMSS\model_pilotnet.h5
-
+```
 Run autopilot with TFLite:
-
+```bash
 python .\autopilot_pilotnet.py run data\session_YYYYMMDD_HHMMSS\model_pilotnet.tflite --tflite
-
+```
 Notes
 
 - This module expects TensorFlow to be installed on the device (TensorFlow 2.x).
