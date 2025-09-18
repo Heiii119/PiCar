@@ -19,21 +19,32 @@ from picamera2 import Picamera2, Preview
 # ==========================
 PCA9685_I2C_ADDR   = 0x40
 # I2C_BUSNUM is not needed with CircuitPython; we use board.SCL/SDA.
-PCA9685_FREQUENCY  = 60
+PCA9685_FREQUENCY  = 50 # 50 Hz is standard for RC servo/ESC pulses
 
+#Channels
 THROTTLE_CHANNEL   = 0
 STEERING_CHANNEL   = 1
 
-# Tune these to your ESC/servo (12-bit scale like original: 0..4095)
-THROTTLE_FORWARD_PWM  = 420
-THROTTLE_STOPPED_PWM  = 370
-THROTTLE_REVERSE_PWM  = 270
 
-STEERING_LEFT_PWM     = 470
-STEERING_RIGHT_PWM    = 290
+# RC pulse ranges (microseconds). Tune to your hardware.
+# Servo (steering)
+STEER_CENTER_US = 1500     # mechanically centered value
+STEER_RANGE_US  = 300      # +/- range from center (e.g., 300 => 1200..1800)
+STEER_MIN_US    = STEER_CENTER_US - STEER_RANGE_US
+STEER_MAX_US    = STEER_CENTER_US + STEER_RANGE_US
 
-SWITCH_PAUSE_S = 0.06
+# ESC (throttle)
+THROTTLE_NEUTRAL_US = 1500
+THROTTLE_FWD_MAX_US = 2000
+THROTTLE_REV_MAX_US = 1000
 
+# Ramping and update rate (smoothness)
+ACTUATOR_HZ   = 200        # actuator update loop frequency
+STEER_STEP_US = 10         # max change per cycle (µs)
+THR_STEP_US   = 6          # smaller for traction
+KEY_POLL_SLEEP = 0.01      # main loop sleep to reduce CPU
+
+# Camera
 FRAME_WIDTH  = 640
 FRAME_HEIGHT = 480
 
@@ -52,28 +63,24 @@ except Exception as e:
         f"Import error: {e}"
     )
 
-def steering_center_pwm():
-    return int(round((STEERING_LEFT_PWM + STEERING_RIGHT_PWM) / 2.0))
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-def clamp12(x):
-    return max(0, min(4095, int(x)))
-
-def to16_from12(v12):
-    # Map 0..4095 to 0..65535 for CircuitPython duty_cycle
-    v12 = clamp12(v12)
-    return int(round(v12 * 65535 / 4095))
+def us_to_duty_cycle(us, freq=PCA9685_FREQUENCY):
+    # Convert microseconds to 16-bit duty_cycle for PCA9685 at given freq
+    # duty = us / period_us * 65535
+    period_us = 1_000_000.0 / freq
+    return int(clamp(round((us / period_us) * 65535.0), 0, 65535))
 
 class PWM:
     def __init__(self, address, freq_hz):
-        # Initialize I2C using default Pi pins
-        # Ensure I2C is enabled: sudo raspi-config -> Interface Options -> I2C -> Enable
         i2c = busio.I2C(board.SCL, board.SDA)
         self.dev = PCA9685(i2c, address=address)
         self.dev.frequency = freq_hz
 
-    def set(self, channel, value_12bit):
-        v16 = to16_from12(value_12bit)
-        self.dev.channels[channel].duty_cycle = v16
+    def set_us(self, channel, pulse_us):
+        self.dev.channels[channel].duty_cycle = us_to_duty_cycle(pulse_us, self.dev.frequency)
+
 
 # ==========================
 # Keyboard (non-blocking)
@@ -122,10 +129,6 @@ def decode_key(ch):
 # ==========================
 # Drive helpers
 # ==========================
-def neutral_all(pwm):
-    pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-    pwm.set(STEERING_CHANNEL, steering_center_pwm())
-
 def print_controls():
     print("# Keyboard control for TT02 (PCA9685) with Picamera2 preview")
     print("# - Up/W:    throttle forward")
@@ -137,14 +140,80 @@ def print_controls():
     print("# - q:       quit (safe stop + center)")
     print()
 
+class DriveState:
+    def __init__(self):
+        # Targets (desired) in microseconds
+        self.target_steer_us   = STEER_CENTER_US
+        self.target_throttle_us= THROTTLE_NEUTRAL_US
+        # Actual outputs (ramped) in microseconds
+        self.out_steer_us      = STEER_CENTER_US
+        self.out_throttle_us   = THROTTLE_NEUTRAL_US
+        # Threading
+        self.lock = threading.Lock()
+        self.alive = True
+
+    def set_steer_norm(self, norm):
+        # norm in [-1, 1]
+        us = STEER_CENTER_US + clamp(norm, -1.0, 1.0) * (STEER_MAX_US - STEER_CENTER_US)
+        with self.lock:
+            self.target_steer_us = clamp(us, STEER_MIN_US, STEER_MAX_US)
+
+    def set_throttle_norm(self, norm):
+        # norm in [-1, 1]; asymmetric range typical for ESC
+        norm = clamp(norm, -1.0, 1.0)
+        if norm >= 0:
+            us = THROTTLE_NEUTRAL_US + norm * (THROTTLE_FWD_MAX_US - THROTTLE_NEUTRAL_US)
+        else:
+            us = THROTTLE_NEUTRAL_US + norm * (THROTTLE_NEUTRAL_US - THROTTLE_REV_MAX_US)
+        with self.lock:
+            self.target_throttle_us = clamp(us, THROTTLE_REV_MAX_US, THROTTLE_FWD_MAX_US)
+
+    def stop_all(self):
+        with self.lock:
+            self.target_throttle_us = THROTTLE_NEUTRAL_US
+            self.target_steer_us = STEER_CENTER_US
+
+# ==========================
+# Actuator thread (smooth ramping)
+# ==========================
+def actuator_loop(pwm, state: DriveState):
+    dt = 1.0 / ACTUATOR_HZ
+    while state.alive:
+        with state.lock:
+            # Ramp steering
+            if state.target_steer_us > state.out_steer_us:
+                state.out_steer_us = min(state.out_steer_us + STEER_STEP_US, state.target_steer_us)
+            else:
+                state.out_steer_us = max(state.out_steer_us - STEER_STEP_US, state.target_steer_us)
+
+            # Ramp throttle
+            if state.target_throttle_us > state.out_throttle_us:
+                state.out_throttle_us = min(state.out_throttle_us + THR_STEP_US, state.target_throttle_us)
+            else:
+                state.out_throttle_us = max(state.out_throttle_us - THR_STEP_US, state.target_throttle_us)
+
+            steer_out = state.out_steer_us
+            thr_out   = state.out_throttle_us
+
+        # Write to hardware outside the lock
+        pwm.set_us(STEERING_CHANNEL, steer_out)
+        pwm.set_us(THROTTLE_CHANNEL, thr_out)
+
+        time.sleep(dt)
+        
 # ==========================
 # Main
 # ==========================
 def main():
-    # Init PWM
+    # Init PWM and neutral
     pwm = PWM(PCA9685_I2C_ADDR, PCA9685_FREQUENCY)
-    neutral_all(pwm)
-    last_throttle = THROTTLE_STOPPED_PWM
+    state = DriveState()
+    pwm.set_us(THROTTLE_CHANNEL, THROTTLE_NEUTRAL_US)
+    pwm.set_us(STEERING_CHANNEL, STEER_CENTER_US)
+
+    # Start actuator thread
+    worker = threading.Thread(target=actuator_loop, args=(pwm, state), daemon=True)
+    worker.start()
 
     # Init Picamera2 and start preview
     picam2 = Picamera2()
@@ -153,7 +222,6 @@ def main():
     )
     picam2.configure(config)
 
-    # Prefer QT if a desktop session is running; otherwise fallback to DRM
     using_qt = True
     try:
         picam2.start_preview(Preview.QT)
@@ -166,99 +234,74 @@ def main():
     print(f"Camera preview started ({'QT' if using_qt else 'DRM'} mode).")
     print("Driving active. Press 'q' to quit.")
 
-    def on_sigint(signum, frame):
+    def on_exit():
+        state.stop_all()
+        time.sleep(0.2)
+        state.alive = False
         try:
-            neutral_all(pwm)
-            time.sleep(0.1)
-        finally:
-            print("\nExiting safely.")
-            try:
-                picam2.stop()
-            except Exception:
-                pass
-            try:
-                picam2.stop_preview()
-            except Exception:
-                pass
-            sys.exit(0)
+            pwm.set_us(THROTTLE_CHANNEL, THROTTLE_NEUTRAL_US)
+            pwm.set_us(STEERING_CHANNEL, STEER_CENTER_US)
+        except Exception:
+            pass
+        try:
+            picam2.stop()
+        except Exception:
+            pass
+        try:
+            picam2.stop_preview()
+        except Exception:
+            pass
+        print("Exited.")
+
+    def on_sigint(signum, frame):
+        print("\nExiting safely.")
+        on_exit()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, on_sigint)
 
-    # Drive loop: key press = action; release = STOP/CENTER
+    # Main key loop: set targets based on keys; actuator thread handles smoothing
     with KB() as kb:
         while True:
             pressed = kb.poll_all()
             up = down = left = right = stop = center = quit_flag = False
-
             for raw in pressed:
                 k = decode_key(raw)
-                if k == 'UP':
-                    up = True
-                elif k == 'DOWN':
-                    down = True
-                elif k == 'LEFT':
-                    left = True
-                elif k == 'RIGHT':
-                    right = True
-                elif k == 'SPACE':
-                    stop = True
-                elif k == 'CENTER':
-                    center = True
-                elif k == 'QUIT':
-                    quit_flag = True
+                if k == 'UP': up = True
+                elif k == 'DOWN': down = True
+                elif k == 'LEFT': left = True
+                elif k == 'RIGHT': right = True
+                elif k == 'SPACE': stop = True
+                elif k == 'CENTER': center = True
+                elif k == 'QUIT': quit_flag = True
 
             if quit_flag:
-                neutral_all(pwm)
                 break
 
-            # Throttle logic
+            # Targets from keys (hold = command; release = neutral/center)
+            # Throttle
             if stop:
-                pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-                last_throttle = THROTTLE_STOPPED_PWM
+                state.set_throttle_norm(0.0)
             elif up and not down:
-                if last_throttle == THROTTLE_REVERSE_PWM:
-                    pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-                    time.sleep(SWITCH_PAUSE_S)
-                pwm.set(THROTTLE_CHANNEL, THROTTLE_FORWARD_PWM)
-                last_throttle = THROTTLE_FORWARD_PWM
+                state.set_throttle_norm(1.0)
             elif down and not up:
-                if last_throttle == THROTTLE_FORWARD_PWM:
-                    pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-                    time.sleep(SWITCH_PAUSE_S)
-                pwm.set(THROTTLE_CHANNEL, THROTTLE_REVERSE_PWM)
-                last_throttle = THROTTLE_REVERSE_PWM
+                state.set_throttle_norm(-1.0)
             else:
-                # No throttle key pressed -> STOP
-                pwm.set(THROTTLE_CHANNEL, THROTTLE_STOPPED_PWM)
-                last_throttle = THROTTLE_STOPPED_PWM
+                state.set_throttle_norm(0.0)
 
-            # Steering logic
+            # Steering
             if center:
-                pwm.set(STEERING_CHANNEL, steering_center_pwm())
+                state.set_steer_norm(0.0)
             elif left and not right:
-                pwm.set(STEERING_CHANNEL, STEERING_LEFT_PWM)
+                state.set_steer_norm(-1.0)
             elif right and not left:
-                pwm.set(STEERING_CHANNEL, STEERING_RIGHT_PWM)
+                state.set_steer_norm(1.0)
             else:
-                # No steering key pressed -> CENTER
-                pwm.set(STEERING_CHANNEL, steering_center_pwm())
+                state.set_steer_norm(0.0)
 
-            time.sleep(0.01)
+            time.sleep(KEY_POLL_SLEEP)
 
-    # Cleanup
-    try:
-        neutral_all(pwm)
-    except Exception:
-        pass
-    try:
-        picam2.stop()
-    except Exception:
-        pass
-    try:
-        picam2.stop_preview()
-    except Exception:
-        pass
-    print("Exited.")
+    on_exit()
 
 if __name__ == "__main__":
     try:
