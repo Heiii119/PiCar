@@ -20,7 +20,7 @@ from picamera2 import Picamera2, Preview
 # User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR  = 0x40
-PCA9685_FREQUENCY = 60     # 60 Hz for TT02 preference
+PCA9685_FREQUENCY = 50     # 60 Hz for TT02 preference
 
 # Channels
 THROTTLE_CHANNEL = 0
