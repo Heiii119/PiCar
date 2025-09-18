@@ -10,14 +10,19 @@ sudo apt-get update
 sudo apt-get install -y python3-venv python3-full
 python3 -m venv ~/tt02-venv
 source ~/tt02-venv/bin/activate
-pip3 install Adafruit-PCA9685
+
 ```
 Later, to use again: ```source ~/tt02-venv/bin/activate```
 
-### Configure I2C PCA9685 servo board
+### Configure I2C PCA9685 servo board (activate the venv first)
 ```bash
+pip3 install Adafruit-PCA9685
 sudo apt-get install -y i2c-tools
 sudo i2cdetect -y 1
+```
+### Install opencv
+```bash
+pip install opencv-python
 ```
 
 
