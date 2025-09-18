@@ -12,6 +12,7 @@ import termios
 import tty
 import select
 import signal
+import threading
 
 from picamera2 import Picamera2, Preview
 
