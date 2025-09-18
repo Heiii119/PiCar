@@ -22,10 +22,15 @@ def ticks_to_us(ticks, freq):
     period_us = 1_000_000.0 / float(freq)
     return int(round((ticks / 4095.0) * period_us))
 
+def ticks_to_duty_pct(ticks):
+    return (max(0, min(4095, int(ticks))) / 4095.0) * 100.0
+
 THROTTLE_STOPPED_US = 1500
 
-STEP = 10
-BIG_STEP = 50
+# Step sizes per request
+STEP = 5        # ticks per normal step
+BIG_STEP = 25   # ticks per big step (Shift)
+
 UI_FPS = 30.0
 
 class PCA9685Driver:
@@ -78,7 +83,7 @@ class PCA9685Driver:
             self._driver.channels[channel].duty_cycle = dc16
 
 def prompt_input(stdscr, row, col, prompt):
-    stdscr.addstr(row, col, " " * 80)
+    stdscr.addstr(row, col, " " * 120)
     stdscr.addstr(row, col, prompt)
     stdscr.refresh()
     curses.echo()
@@ -96,18 +101,18 @@ def prompt_input(stdscr, row, col, prompt):
 def draw_help(stdscr):
     stdscr.addstr(0, 0, "TT02 PWM Tuner (PCA9685)")
     stdscr.addstr(1, 0, "Controls:")
-    stdscr.addstr(2, 2, "A/Left  = select THROTTLE/STEERING")
-    stdscr.addstr(3, 2, "D/Right = select THROTTLE/STEERING")
-    stdscr.addstr(4, 2, "W/Up    = +step       | S/Down  = -step")
-    stdscr.addstr(5, 2, "Shift+W = +big step   | Shift+S = -big step")
-    stdscr.addstr(6, 2, "Space   = throttle -> THROTTLE_STOPPED_PWM (1500 us)")
-    stdscr.addstr(7, 2, "c       = center steering (1600 us)")
-    stdscr.addstr(8, 2, "i       = input ticks (0..4095)")
-    stdscr.addstr(9, 2, "u       = input microseconds")
-    stdscr.addstr(10, 2, "f       = change frequency (Hz)")
-    stdscr.addstr(11, 2, "r       = reset both to defaults (1500/1600 us)")
-    stdscr.addstr(12, 2, "q       = quit")
-    stdscr.addstr(14, 0, "Status:")
+    stdscr.addstr(2, 2, "Arrow Up/Down   = throttle +/- step")
+    stdscr.addstr(3, 2, "Arrow Left/Right= steering +/- step")
+    stdscr.addstr(4, 2, "W/S             = throttle +/- step (alias)")
+    stdscr.addstr(5, 2, "Shift+W/Shift+S = throttle +/- BIG step")
+    stdscr.addstr(6, 2, "Space           = throttle -> 1500 us (stop)")
+    stdscr.addstr(7, 2, "c               = steering -> 1600 us (center)")
+    stdscr.addstr(8, 2, "i               = set ticks (0..4095) for selected channel")
+    stdscr.addstr(9, 2, "u               = set microseconds for selected channel")
+    stdscr.addstr(10,2, "f               = change PCA9685 frequency (Hz)")
+    stdscr.addstr(11,2, "TAB             = switch selected channel (Throttle/Steering)")
+    stdscr.addstr(12,2, "q               = quit")
+    stdscr.addstr(14,0, "Status:")
     stdscr.refresh()
 
 def run(stdscr):
@@ -119,39 +124,48 @@ def run(stdscr):
 
     pwm = PCA9685Driver(address=PCA9685_I2C_ADDR, busnum=PCA9685_I2C_BUSNUM, frequency=PCA9685_FREQUENCY)
 
+    # Initial values per request
     values = {
         "throttle": us_to_12bit(1500, pwm.frequency),
         "steering": us_to_12bit(1600, pwm.frequency),
     }
     channels = {"throttle": THROTTLE_CHANNEL, "steering": STEERING_CHANNEL}
+
+    # Selected channel for i/u input; arrows directly map, but TAB can toggle selection
     items = ["throttle", "steering"]
     sel_idx = 0
 
+    # Apply startup outputs
     pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
     pwm.set_pwm_12bit(channels["steering"], values["steering"])
 
     draw_help(stdscr)
     last_ui = 0.0
 
+    def clamp12(v):
+        return max(0, min(4095, int(v)))
+
     def apply_outputs():
         pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
         pwm.set_pwm_12bit(channels["steering"], values["steering"])
-
-    def clamp12(v):
-        return max(0, min(4095, int(v)))
 
     def redraw():
         freq = pwm.frequency
         thr = values["throttle"]
         ste = values["steering"]
-        stdscr.addstr(15, 0, f"Selected: {items[sel_idx].upper():9s}    PCA9685 Freq: {int(freq):4d} Hz                            ")
-        stdscr.addstr(17, 0, f"Throttle: ch{channels['throttle']}  ticks={thr:4d}  ~us={ticks_to_us(thr, freq):4d}                    ")
-        stdscr.addstr(18, 0, f"Steering: ch{channels['steering']}  ticks={ste:4d}  ~us={ticks_to_us(ste, freq):4d}                    ")
-        stdscr.addstr(20, 0, f"THROTTLE_STOPPED_PWM (ticks at {int(freq)} Hz) = {us_to_12bit(THROTTLE_STOPPED_US, freq)}               ")
+        thr_us = ticks_to_us(thr, freq)
+        ste_us = ticks_to_us(ste, freq)
+        thr_dc = ticks_to_duty_pct(thr)
+        ste_dc = ticks_to_duty_pct(ste)
+
+        stdscr.addstr(15, 0, f"Selected: {items[sel_idx].upper():9s}    PCA9685 Freq: {int(freq):4d} Hz                                ")
+        stdscr.addstr(17, 0, f"Throttle: ch{channels['throttle']}  ticks={thr:4d}  ~us={thr_us:4d}  duty={thr_dc:6.2f}%                 ")
+        stdscr.addstr(18, 0, f"Steering: ch{channels['steering']}  ticks={ste:4d}  ~us={ste_us:4d}  duty={ste_dc:6.2f}%                 ")
+        stdscr.addstr(20, 0, f"Stop target: 1500 us -> ticks={us_to_12bit(1500, freq)}     Center target: 1600 us -> ticks={us_to_12bit(1600, freq)}   ")
         stdscr.refresh()
 
     def cleanup_and_exit():
-        pass
+        pass  # leave outputs as-is
 
     def sigint_handler(signum, frame):
         cleanup_and_exit()
@@ -169,26 +183,34 @@ def run(stdscr):
             if ch != -1:
                 if ch in (ord('q'), ord('Q')):
                     return
-                elif ch in (curses.KEY_LEFT, ord('a'), ord('A')):
-                    sel_idx = (sel_idx - 1) % len(items)
-                elif ch in (curses.KEY_RIGHT, ord('d'), ord('D')):
+
+                # Switch selected channel (for i/u input convenience)
+                elif ch in (curses.KEY_BTAB, 9):  # Shift+Tab maps to KEY_BTAB; 9 is Tab
                     sel_idx = (sel_idx + 1) % len(items)
+
+                # Throttle adjustments (Up/Down and W/S)
                 elif ch in (curses.KEY_UP, ord('w')):
-                    key = items[sel_idx]
-                    values[key] = clamp12(values[key] + STEP)
-                    pwm.set_pwm_12bit(channels[key], values[key])
+                    values["throttle"] = clamp12(values["throttle"] + STEP)
+                    pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
                 elif ch in (curses.KEY_DOWN, ord('s')):
-                    key = items[sel_idx]
-                    values[key] = clamp12(values[key] - STEP)
-                    pwm.set_pwm_12bit(channels[key], values[key])
+                    values["throttle"] = clamp12(values["throttle"] - STEP)
+                    pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
                 elif ch in (ord('W'),):
-                    key = items[sel_idx]
-                    values[key] = clamp12(values[key] + BIG_STEP)
-                    pwm.set_pwm_12bit(channels[key], values[key])
+                    values["throttle"] = clamp12(values["throttle"] + BIG_STEP)
+                    pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
                 elif ch in (ord('S'),):
-                    key = items[sel_idx]
-                    values[key] = clamp12(values[key] - BIG_STEP)
-                    pwm.set_pwm_12bit(channels[key], values[key])
+                    values["throttle"] = clamp12(values["throttle"] - BIG_STEP)
+                    pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
+
+                # Steering adjustments (Left/Right)
+                elif ch in (curses.KEY_RIGHT,):
+                    values["steering"] = clamp12(values["steering"] + STEP)
+                    pwm.set_pwm_12bit(channels["steering"], values["steering"])
+                elif ch in (curses.KEY_LEFT,):
+                    values["steering"] = clamp12(values["steering"] - STEP)
+                    pwm.set_pwm_12bit(channels["steering"], values["steering"])
+
+                # Direct set for selected channel
                 elif ch in (ord('i'), ord('I')):
                     key = items[sel_idx]
                     s = prompt_input(stdscr, 22, 0, f"Enter 12-bit ticks (0..4095) for {key}: ")
@@ -207,21 +229,22 @@ def run(stdscr):
                         pwm.set_pwm_12bit(channels[key], values[key])
                     except Exception:
                         pass
+
+                # Frequency change
                 elif ch in (ord('f'), ord('F')):
                     s = prompt_input(stdscr, 22, 0, "Enter PCA9685 frequency in Hz (e.g., 50): ")
                     try:
                         hz = int(float(s))
                         hz = max(24, min(1526, hz))
                         pwm.set_pwm_freq(hz)
+                        # reapply ticks (ticks unchanged; duty mapping applies inside driver)
                         apply_outputs()
                     except Exception:
                         pass
-                elif ch in (ord('r'), ord('R')):
-                    values["throttle"] = us_to_12bit(1500, pwm.frequency)
-                    values["steering"] = us_to_12bit(1600, pwm.frequency)
-                    apply_outputs()
+
+                # Space -> throttle stop, c -> steering center
                 elif ch in (ord(' '),):
-                    values["throttle"] = us_to_12bit(THROTTLE_STOPPED_US, pwm.frequency)
+                    values["throttle"] = us_to_12bit(1500, pwm.frequency)
                     pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
                 elif ch in (ord('c'), ord('C')):
                     values["steering"] = us_to_12bit(1600, pwm.frequency)
