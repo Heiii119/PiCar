@@ -350,6 +350,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 class KB:
     def __enter__(self):
         self.fd = sys.stdin.fileno()
+               # Save current terminal settings
         self.old = termios.tcgetattr(self.fd)
         tty.setcbreak(self.fd)
         return self
@@ -362,4 +363,109 @@ class KB:
         while select.select([sys.stdin], [], [], 0)[0]:
             ch = sys.stdin.read(1)
             if ch == '\x1b':
-               
+                time.sleep(0.001)
+                seq = ch
+                while select.select([sys.stdin], [], [], 0)[0]:
+                    seq += sys.stdin.read(1)
+                keys.append(seq)
+            else:
+                keys.append(ch)
+        return keys
+
+def decode_key(ch):
+    if ch in ('w','W','\x1b[A'):
+        return 'UP'
+    if ch in ('s','S','\x1b[B'):
+        return 'DOWN'
+    if ch in ('a','A','\x1b[D'):
+        return 'LEFT'
+    if ch in ('d','D','\x1b[C'):
+        return 'RIGHT'
+    if ch == ' ':
+        return 'SPACE'
+    if ch in ('c','C'):
+        return 'CENTER'
+    if ch in ('q','Q','\x03'):
+        return 'QUIT'
+    return None
+
+def print_controls():
+    print("# Control TT02 RC car over network or locally.")
+    print("# Buttons on / page control throttle/steering.")
+    print("# - Up:     throttle forward")
+    print("# - Down:   throttle reverse")
+    print("# - Left:   steer left")
+    print("# - Right:  steer right")
+    print("# - Space:  throttle stop")
+    print("# - c:      center steering")
+    print("# - q:      quit (safely stops and centers)")
+    print()
+
+# ==========================
+# Main server runner
+# ==========================
+def run_server():
+    server = HTTPServer((HOST, PORT), RequestHandler)
+    print(f"Server running at http://0.0.0.0:{PORT}/")
+    print("Open http://<this-device-ip>:{PORT}/ from your phone on the same Wi‑Fi.")
+    return server
+
+def main():
+    print_controls()
+
+    def on_sigint(signum, frame):
+        try:
+            car.neutral_all()
+            preview.stop()
+            time.sleep(0.1)
+        finally:
+            print("\nExiting safely.")
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+            sys.exit(0)
+    signal.signal(signal.SIGINT, on_sigint)
+
+    server = run_server()
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    print("Local keys active in this terminal. Press 'q' or Ctrl-C to quit.")
+    with KB() as kb:
+        while True:
+            for raw in kb.poll_all():
+                k = decode_key(raw)
+                if k == 'UP':
+                    car.throttle_forward()
+                elif k == 'DOWN':
+                    car.throttle_reverse()
+                elif k == 'LEFT':
+                    car.steer_left()
+                elif k == 'RIGHT':
+                    car.steer_right()
+                elif k == 'SPACE':
+                    car.throttle_stop()
+                elif k == 'CENTER':
+                    car.steer_center()
+                elif k == 'QUIT':
+                    car.neutral_all()
+                    preview.stop()
+                    server.shutdown()
+                    return
+            # Light decay to neutral for local control loop
+            car.throttle_stop()
+            car.steer_center()
+            time.sleep(0.05)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except OSError as e:
+        print(f"Socket error: {e}")
+        print("Tip: If binding fails, ensure no other process uses the port and that you have network up.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        print("Tip: Ensure I2C is enabled and required packages are installed.")
+        sys.exit(1)
