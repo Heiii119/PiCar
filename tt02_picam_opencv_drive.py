@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Picamera2 preview + keyboard control for TT02 RC car via Adafruit PCA9685.
+# Picamera2 preview + keyboard control for TT02 RC car via Adafruit PCA9685 (CircuitPython).
 # - Uses Picamera2 preview (QT on desktop, DRM on console), no OpenCV windows.
 # - Drive with arrow keys or WASD.
 # - On key release: throttle returns to STOP, steering to CENTER.
@@ -18,19 +18,19 @@ from picamera2 import Picamera2, Preview
 # User-configurable settings
 # ==========================
 PCA9685_I2C_ADDR   = 0x40
-I2C_BUSNUM         = 1
+# I2C_BUSNUM is not needed with CircuitPython; we use board.SCL/SDA.
 PCA9685_FREQUENCY  = 60
 
 THROTTLE_CHANNEL   = 0
 STEERING_CHANNEL   = 1
 
-# Tune these to your ESC/servo
-THROTTLE_FORWARD_PWM  = 400
+# Tune these to your ESC/servo (12-bit scale like original: 0..4095)
+THROTTLE_FORWARD_PWM  = 420
 THROTTLE_STOPPED_PWM  = 370
-THROTTLE_REVERSE_PWM  = 220
+THROTTLE_REVERSE_PWM  = 270
 
 STEERING_LEFT_PWM     = 470
-STEERING_RIGHT_PWM    = 270
+STEERING_RIGHT_PWM    = 290
 
 SWITCH_PAUSE_S = 0.06
 
@@ -38,12 +38,19 @@ FRAME_WIDTH  = 640
 FRAME_HEIGHT = 480
 
 # ==========================
-# PCA9685 init
+# PCA9685 (CircuitPython) init
 # ==========================
 try:
-    import Adafruit_PCA9685 as LegacyPCA9685
-except ImportError:
-    sys.exit("Missing Adafruit-PCA9685. Run: pip install Adafruit-PCA9685")
+    # CircuitPython drivers via Blinka
+    import board
+    import busio
+    from adafruit_pca9685 import PCA9685
+except Exception as e:
+    sys.exit(
+        "Missing CircuitPython PCA9685 deps. In your venv run:\n"
+        "  pip install adafruit-circuitpython-pca9685 adafruit-blinka\n"
+        f"Import error: {e}"
+    )
 
 def steering_center_pwm():
     return int(round((STEERING_LEFT_PWM + STEERING_RIGHT_PWM) / 2.0))
@@ -51,14 +58,22 @@ def steering_center_pwm():
 def clamp12(x):
     return max(0, min(4095, int(x)))
 
+def to16_from12(v12):
+    # Map 0..4095 to 0..65535 for CircuitPython duty_cycle
+    v12 = clamp12(v12)
+    return int(round(v12 * 65535 / 4095))
+
 class PWM:
-    def __init__(self, address, busnum, freq_hz):
-        self.dev = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
-        self.dev.set_pwm_freq(freq_hz)
+    def __init__(self, address, freq_hz):
+        # Initialize I2C using default Pi pins
+        # Ensure I2C is enabled: sudo raspi-config -> Interface Options -> I2C -> Enable
+        i2c = busio.I2C(board.SCL, board.SDA)
+        self.dev = PCA9685(i2c, address=address)
+        self.dev.frequency = freq_hz
 
     def set(self, channel, value_12bit):
-        v = clamp12(value_12bit)
-        self.dev.set_pwm(channel, 0, v)
+        v16 = to16_from12(value_12bit)
+        self.dev.channels[channel].duty_cycle = v16
 
 # ==========================
 # Keyboard (non-blocking)
@@ -127,7 +142,7 @@ def print_controls():
 # ==========================
 def main():
     # Init PWM
-    pwm = PWM(PCA9685_I2C_ADDR, I2C_BUSNUM, PCA9685_FREQUENCY)
+    pwm = PWM(PCA9685_I2C_ADDR, PCA9685_FREQUENCY)
     neutral_all(pwm)
     last_throttle = THROTTLE_STOPPED_PWM
 
@@ -172,7 +187,6 @@ def main():
     # Drive loop: key press = action; release = STOP/CENTER
     with KB() as kb:
         while True:
-            # Collect all keys pressed this tick
             pressed = kb.poll_all()
             up = down = left = right = stop = center = quit_flag = False
 
@@ -251,5 +265,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"Error: {e}")
-        print("Tip: Ensure python3-picamera2 is installed and the camera is enabled in Raspberry Pi Configuration.")
+        print("Tip: Ensure python3-picamera2 is available (system site-packages) and I2C is enabled.")
         sys.exit(1)
