@@ -27,6 +27,7 @@ pip install Adafruit-Blinka adafruit-circuitpython-busdevice adafruit-circuitpyt
 ```
 ```bash
 sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps libgpiod2
+sudo apt update && sudo apt install -y i2c-tools
 ```
 ```bash
 sudo raspi-config # enable I2C and SPI
