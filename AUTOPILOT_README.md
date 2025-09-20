@@ -15,7 +15,7 @@ uname -m
 If uname -m prints aarch64, proceed with the TensorFlow install steps I shared:
 ```bash
 sudo apt update && sudo apt install -y libatlas-base-dev libhdf5-dev libblas-dev liblapack-dev gfortran
-python3 -m venv ~/tf-venv && source ~/tf-venv/bin/activate
+python3 -m venv --system-site-packages tf-venv && source tf-venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel packaging
 pip cache purge
 pip install "Send2Trash>=1.8.2"
