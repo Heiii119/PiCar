@@ -19,8 +19,7 @@ python3 -m venv --system-site-packages tf-venv && source tf-venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel packaging
 pip cache purge
 pip install "Send2Trash>=1.8.2"
-pip install --no-cache-dir tensorflow-aarch64
-pip install tensorflow-aarch64==2.16.1
+pip install --no-cache-dir tensorflow-aarch64==2.16.1
 python -c "import tensorflow as tf; print(tf.version); print(tf.config.list_physical_devices('CPU'))"
 ```
 ```bash
