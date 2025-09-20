@@ -20,7 +20,29 @@ python -m pip install --upgrade pip setuptools wheel packaging
 pip cache purge
 pip install "Send2Trash>=1.8.2"
 pip install --no-cache-dir tensorflow-aarch64
+pip install tensorflow-aarch64==2.16.1
 python -c "import tensorflow as tf; print(tf.version); print(tf.config.list_physical_devices('CPU'))"
+```
+```bash
+pip install Adafruit-Blinka adafruit-circuitpython-busdevice adafruit-circuitpython-pca9685 adafruit-circuitpython-motor adafruit-circuitpython-servokit
+```
+```bash
+sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps libgpiod2
+```
+```bash
+sudo raspi-config # enable I2C and SPI
+```
+```bash
+sudo usermod -aG gpio,i2c,spi,video $USER
+```
+```bash
+sudo reboot
+```
+verify
+```bash
+source tf-venv/bin/activate
+python -c "import board, busio; print('board OK:', hasattr(board, 'SCL'))"
+python -c "from picamera2 import Picamera2; print('picamera2 OK')"
 ```
 
 
