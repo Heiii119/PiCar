@@ -56,7 +56,7 @@ i2cdetect -y 1
 ```
 
 
-Quick examples (PowerShell)
+# Quick examples (PowerShell)
 
 Record a session using the existing tool in the repo (from the main script):
 ```bash
