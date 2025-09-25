@@ -8,15 +8,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-SESSIONS_ROOT = "~/PiCar/data"
+# Hardcoded default to your sessions root so you can just run the script
+DEFAULT_SESSIONS_ROOT = os.path.expanduser("~/PiCar/data")
 SESSION_PREFIX = "session_"
 
-def find_sessions(root=SESSIONS_ROOT, prefix=SESSION_PREFIX):
+def find_sessions(root, prefix=SESSION_PREFIX):
+    root = os.path.expanduser(root)
     if not os.path.isdir(root):
         print(f"[error] Sessions root not found: {root}")
         return []
     sessions = []
-    for name in sorted(os.listdir(root)):
+    try:
+        names = sorted(os.listdir(root))
+    except Exception as e:
+        print(f"[error] Cannot list directory {root}: {e}")
+        return []
+    for name in names:
         full = os.path.join(root, name)
         if os.path.isdir(full) and name.startswith(prefix):
             sessions.append(full)
@@ -51,7 +58,7 @@ def load_model(path):
     return keras.models.load_model(path)
 
 def extract_history_from_model(model):
-    # Try common places to find training history embedded with the model
+    # Try common places where history may be stored
     hist = getattr(model, "history", None)
     if hist is not None and hasattr(hist, "history"):
         return hist.history
@@ -72,7 +79,7 @@ def plot_curves(history, out_prefix="model"):
         print("[warn] No history dict to plot.")
         return []
 
-    # Determine epoch count
+    # Determine epochs length from the first series
     first_series = next((v for v in history.values() if hasattr(v, "__len__")), [])
     epochs = range(1, len(first_series) + 1)
     saved = []
@@ -122,10 +129,23 @@ def plot_curves(history, out_prefix="model"):
     return saved
 
 def main():
-    # Always list sessions under /data and prompt user
-    sessions = find_sessions()
+    # Optional: user can still override by passing a path or using SESSIONS_ROOT
+    # argv path gets ~ expansion; if not provided, use the hardcoded DEFAULT
+    env_root = os.environ.get("SESSIONS_ROOT")
+    if len(sys.argv) > 1:
+        sessions_root = os.path.expanduser(sys.argv[1])
+    elif env_root:
+        sessions_root = os.path.expanduser(env_root)
+    else:
+        sessions_root = DEFAULT_SESSIONS_ROOT
+
+    sessions = find_sessions(sessions_root)
     if not sessions:
-        print(f"[error] No session directories found under {SESSIONS_ROOT} (expected names like {SESSION_PREFIX}YYYYMMDD_HHMMSS).")
+        print(f"[error] No session directories found under {sessions_root} (expected names like {SESSION_PREFIX}YYYYMMDD_HHMMSS).")
+        print("Hint: Place your session_* folders under this path, or run with a custom root, e.g.:")
+        print(f"  python3 {os.path.basename(__file__)} /path/to/your/data")
+        print("or set env var:")
+        print(f"  SESSIONS_ROOT=/path/to/your/data python3 {os.path.basename(__file__)}")
         sys.exit(1)
 
     session_dir = pick_session_interactive(sessions)
@@ -141,7 +161,6 @@ def main():
         print("If you have a separate history JSON/CSV, share the path and I can adapt the script.")
         sys.exit(0)
 
-    # Validate history lengths
     if isinstance(history, dict):
         lengths = {k: len(v) for k, v in history.items() if hasattr(v, "__len__")}
         if lengths:
