@@ -252,7 +252,7 @@ def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
     return model
 
 # ------------------------------
-# Picamera2 manager with Qt windowed preview
+# Picamera2 manager with Qt windowed preview (single-stream config)
 # ------------------------------
 class PiCam2Manager:
     def __init__(self, width=IMAGE_W, height=IMAGE_H, framerate=CAMERA_FRAMERATE,
@@ -260,33 +260,56 @@ class PiCam2Manager:
         self.picam2 = Picamera2()
         transform = Transform(hflip=hflip, vflip=vflip)
 
-        # Dual stream config: main for capture (RGB), preview for Qt window (Qt-friendly format)
+        # Older-compatible API: configure only main stream.
+        # Use a Qt-friendly format. If this raises, try "XRGB8888" or omit "format".
         self.config = self.picam2.create_preview_configuration(
-            main={"size": (width, height), "format": "RGB888"},
-            preview={"size": (640, 480), "format": "XBGR8888"},  # try "XRGB8888" if needed
+            main={"size": (max(640, width), max(480, height)), "format": "XBGR8888"},
             transform=transform
         )
         self.picam2.configure(self.config)
 
         self.with_preview = with_preview
         if self.with_preview:
+            # Try QTGL first; fall back to QT if needed.
             try:
-                # Qt windowed preview on desktop (X/Wayland)
                 self.picam2.start_preview(Preview.QTGL)
-            except Exception as e:
-                print(f"Preview.QTGL failed ({e}); preview disabled.")
-                self.with_preview = False
+            except Exception as e1:
+                print(f"Preview.QTGL failed ({e1}); trying Preview.QT ...")
+                try:
+                    self.picam2.start_preview(Preview.QT)
+                except Exception as e2:
+                    print(f"Preview.QT also failed ({e2}); preview disabled.")
+                    self.with_preview = False
 
         # Start camera
         self.picam2.start()
         time.sleep(0.2)  # warmup
 
+        # If you need to strictly capture at IMAGE_WxIMAGE_H for storage/model,
+        # you can downscale in software before saving.
+        self.capture_resize = (IMAGE_W, IMAGE_H)
+
     def capture_rgb(self):
-        # Returns HxWx3 RGB array (uint8) from the "main" stream
-        return self.picam2.capture_array("main")
+        # Capture from the (only) main stream in current API.
+        arr = self.picam2.capture_array()
+        # Ensure RGB order if needed; XBGR8888 will arrive as 4 channels sometimes.
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            # Convert BGRA/XBGR to RGB by dropping alpha and reordering
+            # Current format "XBGR8888" often yields BGRA; adjust if colors look wrong.
+            b, g, r, _ = np.split(arr, 4, axis=2)
+            arr = np.concatenate([r, g, b], axis=2)
+        elif arr.ndim == 3 and arr.shape[2] == 3:
+            # Assume already RGB; some backends may provide BGR. Swap if colors look off.
+            pass
+
+        # Resize to model/storage resolution if necessary
+        if arr.shape[1] != self.capture_resize[0] or arr.shape[0] != self.capture_resize[1]:
+            from PIL import Image
+            arr = np.array(Image.fromarray(arr).resize(self.capture_resize))
+        return arr
 
     def annotate(self, text):
-        # Keep simple for portability (Qt overlay APIs vary)
+        # Keep simple for portability
         pass
 
     def stop(self):
