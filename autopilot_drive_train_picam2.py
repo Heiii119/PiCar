@@ -26,10 +26,10 @@ from tensorflow.keras import layers, models, optimizers
 # Configuration (from your spec)
 # ------------------------------
 PWM_STEERING_THROTTLE = {
-    "PWM_STEERING_PIN": "PCA9685.1:40.1",
+    "PWM_STEERING_PIN": "PCA9685.1:0x40.1",  # changed to 0x40
     "PWM_STEERING_SCALE": 1.0,
     "PWM_STEERING_INVERTED": False,
-    "PWM_THROTTLE_PIN": "PCA9685.1:40.0",
+    "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # changed to 0x40
     "PWM_THROTTLE_SCALE": 1.0,
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 460,
@@ -53,14 +53,14 @@ CAMERA_HFLIP = False
 # Utility: PCA9685 helper
 # ------------------------------
 def parse_pca9685_pin(pin_str):
-    # Format "PCA9685.<bus>:<addr>.<channel>", e.g. "PCA9685.1:40.1"
+    # Format "PCA9685.<bus>:<addr>.<channel>", e.g. "PCA9685.1:0x40.1"
     try:
         left, chan = pin_str.split(":")
         bus_str = left.split(".")[1]
         addr_str = chan.split(".")[0] if "." in chan else chan
         channel_str = chan.split(".")[1] if "." in chan else "0"
         i2c_bus = int(bus_str)
-        i2c_addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+        i2c_addr = int(addr_str, 16) if addr_str.startswith(("0x", "0X")) else int(addr_str)
         channel = int(channel_str)
         return i2c_bus, i2c_addr, channel
     except Exception as e:
@@ -78,6 +78,8 @@ class MotorServoController:
 
         # RPi I2C bus is typically 1
         self.i2c = busio.I2C(board.SCL, board.SDA)
+        # Debug print to confirm parsed address
+        print(f"Using PCA9685 on I2C bus {s_bus}, address 0x{s_addr:02x}, steer ch {s_ch}, throttle ch {t_ch}")
         self.pca = PCA9685(self.i2c, address=s_addr)
         self.pca.frequency = 60  # 60Hz typical
 
@@ -172,7 +174,6 @@ class KeyboardDriver:
         # Handle escape sequences for arrow keys
         if ch == '\x1b':
             # read next two chars if present
-            # non-blocking small waits
             seq = ''
             for _ in range(2):
                 nxt = kb.get_key(timeout=0.001)
@@ -256,7 +257,7 @@ def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
     return model
 
 # ------------------------------
-# Picamera2 manager (DRM preview)
+# Picamera2 manager
 # ------------------------------
 class PiCam2Manager:
     def __init__(self, width=IMAGE_W, height=IMAGE_H, framerate=CAMERA_FRAMERATE,
@@ -269,7 +270,6 @@ class PiCam2Manager:
         )
         self.picam2.configure(self.config)
         self.with_preview = with_preview
-        # Try DRM preview first; if it fails (e.g., not on local console), fall back to headless
         if self.with_preview:
             try:
                 self.picam2.start_preview(Preview.DRM)
@@ -286,7 +286,7 @@ class PiCam2Manager:
         return frame
 
     def annotate(self, text):
-        # DRM preview path has limited overlay options; skipping for robustness.
+        # Preview overlay skipped for portability
         pass
 
     def stop(self):
@@ -302,7 +302,6 @@ class PiCam2Manager:
 # ------------------------------
 def preview_and_record():
     print("Opening Picamera2 preview. Controls: r to start/stop recording, q to quit.")
-    # Use DRM preview (no Qt). If not on local console, it will auto-fallback to no preview.
     cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP, with_preview=True)
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     driver = KeyboardDriver()
@@ -418,7 +417,6 @@ def autopilot_loop(model_path):
 
     model = tf.keras.models.load_model(model_path)
 
-    # Use DRM preview; fallback to no preview if not available
     cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP, with_preview=True)
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     period = 1.0 / DRIVE_LOOP_HZ
@@ -476,7 +474,7 @@ def autopilot_loop(model_path):
         ctrl.close()
 
 def main():
-    print("Picamera2 preview will open (DRM). Controls: WASD/Arrows to drive, space stop, c center, r record, q quit.")
+    print("Picamera2 preview will open. Controls: WASD/Arrows to drive, space stop, c center, r record, q quit.")
     session_root = preview_and_record()
     ans = input("Train model on recorded session? [y/N]: ").strip().lower()
     model_path = None
