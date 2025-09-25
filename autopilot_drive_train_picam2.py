@@ -23,13 +23,13 @@ import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers
 
 # ------------------------------
-# Configuration (from your spec)
+# Configuration
 # ------------------------------
 PWM_STEERING_THROTTLE = {
-    "PWM_STEERING_PIN": "PCA9685.1:0x40.1",  # changed to 0x40
+    "PWM_STEERING_PIN": "PCA9685.1:0x40.1",  # ensure 0x40
     "PWM_STEERING_SCALE": 1.0,
     "PWM_STEERING_INVERTED": False,
-    "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # changed to 0x40
+    "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # ensure 0x40
     "PWM_THROTTLE_SCALE": 1.0,
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 460,
@@ -78,7 +78,6 @@ class MotorServoController:
 
         # RPi I2C bus is typically 1
         self.i2c = busio.I2C(board.SCL, board.SDA)
-        # Debug print to confirm parsed address
         print(f"Using PCA9685 on I2C bus {s_bus}, address 0x{s_addr:02x}, steer ch {s_ch}, throttle ch {t_ch}")
         self.pca = PCA9685(self.i2c, address=s_addr)
         self.pca.frequency = 60  # 60Hz typical
@@ -147,7 +146,6 @@ class KeyboardDriver:
         self.manual_quit = False
 
     def handle_char(self, ch):
-        # Arrow keys arrive as escape sequences: '\x1b[A' up, '\x1b[B' down, '\x1b[C' right, '\x1b[D' left
         if ch is None:
             return
         if ch == 'q':
@@ -171,9 +169,8 @@ class KeyboardDriver:
         if ch in ('s',):  # down
             self.throttle = float(np.clip(self.throttle - self.throttle_step, -1, 1))
             return
-        # Handle escape sequences for arrow keys
+        # Arrow keys via escape sequences
         if ch == '\x1b':
-            # read next two chars if present
             seq = ''
             for _ in range(2):
                 nxt = kb.get_key(timeout=0.001)
@@ -211,9 +208,7 @@ def append_label(csv_path, image_name, steering, throttle):
         w.writerow([image_name, f"{steering:.4f}", f"{throttle:.4f}"])
 
 def load_image_for_model(rgb_array):
-    # Ensure shape HxWx3 and size to model input
     if rgb_array.shape[0] != IMAGE_H or rgb_array.shape[1] != IMAGE_W:
-        # Picamera2 can deliver at desired size; this is a safeguard
         from PIL import Image
         im = Image.fromarray(rgb_array)
         im = im.resize((IMAGE_W, IMAGE_H))
@@ -257,36 +252,41 @@ def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
     return model
 
 # ------------------------------
-# Picamera2 manager
+# Picamera2 manager with Qt windowed preview
 # ------------------------------
 class PiCam2Manager:
     def __init__(self, width=IMAGE_W, height=IMAGE_H, framerate=CAMERA_FRAMERATE,
                  hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP, with_preview=True):
         self.picam2 = Picamera2()
         transform = Transform(hflip=hflip, vflip=vflip)
+
+        # Dual stream config: main for capture (RGB), preview for Qt window (Qt-friendly format)
         self.config = self.picam2.create_preview_configuration(
             main={"size": (width, height), "format": "RGB888"},
+            preview={"size": (640, 480), "format": "XBGR8888"},  # try "XRGB8888" if needed
             transform=transform
         )
         self.picam2.configure(self.config)
+
         self.with_preview = with_preview
         if self.with_preview:
             try:
-                self.picam2.start_preview(Preview.DRM)
+                # Qt windowed preview on desktop (X/Wayland)
+                self.picam2.start_preview(Preview.QTGL)
             except Exception as e:
-                print(f"Preview.DRM failed ({e}); continuing without preview.")
+                print(f"Preview.QTGL failed ({e}); preview disabled.")
                 self.with_preview = False
+
+        # Start camera
         self.picam2.start()
-        # Allow warmup
-        time.sleep(0.2)
+        time.sleep(0.2)  # warmup
 
     def capture_rgb(self):
-        # Returns HxWx3 RGB array (uint8)
-        frame = self.picam2.capture_array("main")
-        return frame
+        # Returns HxWx3 RGB array (uint8) from the "main" stream
+        return self.picam2.capture_array("main")
 
     def annotate(self, text):
-        # Preview overlay skipped for portability
+        # Keep simple for portability (Qt overlay APIs vary)
         pass
 
     def stop(self):
@@ -324,6 +324,7 @@ def preview_and_record():
             while True:
                 # Capture frame
                 frame_rgb = cam.capture_rgb()  # HxWx3 RGB
+
                 # Poll keyboard
                 ch = kb.get_key(timeout=0.0)
                 if ch == 'r':
@@ -349,10 +350,8 @@ def preview_and_record():
 
                 # Save data if recording
                 if session_root is not None:
-                    # Save JPEG
                     img_name = f"{frame_idx:06d}.jpg"
                     img_path = os.path.join(session_root, "images", img_name)
-                    # Use PIL to save
                     from PIL import Image
                     Image.fromarray(frame_rgb).save(img_path, quality=90)
                     append_label(csv_path, img_name, driver.steering, driver.throttle)
@@ -422,11 +421,9 @@ def autopilot_loop(model_path):
     period = 1.0 / DRIVE_LOOP_HZ
     last_loop = time.time()
 
-    # Allow manual override (hold h to enable manual, a to resume; q to quit)
     manual_override = False
     driver = KeyboardDriver()
 
-    # Arm ESC
     ctrl.stop()
     time.sleep(1.0)
 
