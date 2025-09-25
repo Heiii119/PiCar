@@ -1,53 +1,167 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+import os
+import sys
+import glob
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-VENV_DIR="plot-venv"
+# Use non-interactive backend (safe over SSH/headless)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
-echo "[info] Using Python: $PYTHON_BIN ($($PYTHON_BIN --version 2>/dev/null || echo 'not found'))"
-echo "[info] Creating virtual environment at: $VENV_DIR"
+DEFAULT_SESSIONS_ROOT = os.environ.get("SESSIONS_ROOT", "/data")
+SESSION_PREFIX = "session_"
 
-# Ensure venv module is available
-if ! $PYTHON_BIN -m venv --help >/dev/null 2>&1; then
-  echo "[info] python3-venv not found; installing it (requires sudo)..."
-  if command -v apt >/dev/null 2>&1; then
-    sudo apt update
-    sudo apt install -y python3-venv
-  else
-    echo "[error] The venv module is unavailable and apt is not present. Install a Python venv tool, then retry."
-    exit 1
-  fi
-fi
+def find_sessions(root, prefix=SESSION_PREFIX):
+    if not os.path.isdir(root):
+        print(f"[error] Sessions root not found: {root}")
+        return []
+    sessions = []
+    try:
+        names = sorted(os.listdir(root))
+    except Exception as e:
+        print(f"[error] Cannot list directory {root}: {e}")
+        return []
+    for name in names:
+        full = os.path.join(root, name)
+        if os.path.isdir(full) and name.startswith(prefix):
+            sessions.append(full)
+    return sessions
 
-$PYTHON_BIN -m venv "$VENV_DIR"
+def pick_session_interactive(sessions):
+    print("Available sessions:")
+    for i, s in enumerate(sessions, 1):
+        print(f" [{i}] {s}")
+    while True:
+        choice = input(f"Choose a session [1-{len(sessions)}]: ").strip()
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(sessions):
+                return sessions[idx - 1]
+        print("Invalid choice, try again.")
 
-# shellcheck disable=SC1090
-source "$VENV_DIR/bin/activate"
+def find_keras_in_session(session_dir):
+    keras_files = glob.glob(os.path.join(session_dir, "*.keras"))
+    if not keras_files:
+        print(f"[error] No .keras files found in: {session_dir}")
+        return None
+    if len(keras_files) > 1:
+        print("[info] Multiple .keras files found; using the first. To choose a specific file, move others out temporarily.")
+        for f in keras_files:
+            print("  -", f)
+    return keras_files[0]
 
-echo "[info] Upgrading pip/setuptools/wheel..."
-pip install --upgrade pip setuptools wheel
+def load_model(path):
+    from tensorflow import keras
+    print(f"[info] Loading model: {path}")
+    return keras.models.load_model(path)
 
-echo "[info] Installing required packages into $VENV_DIR..."
-# Matplotlib for plotting, TensorFlow + Keras to load .keras models
-pip install "matplotlib>=3.5" "tensorflow>=2.14" "keras>=2.14"
+def extract_history_from_model(model):
+    hist = getattr(model, "history", None)
+    if hist is not None and hasattr(hist, "history"):
+        return hist.history
+    if hasattr(model, "_training_history") and isinstance(model._training_history, dict):
+        return model._training_history
+    try:
+        cfg = model.get_config()
+        if isinstance(cfg, dict):
+            for key in ("training_history", "history", "fit_history"):
+                if key in cfg and isinstance(cfg[key], dict):
+                    return cfg[key]
+    except Exception:
+        pass
+    return None
 
-echo "[info] Verifying imports..."
-python - <<'PY'
-try:
-    import matplotlib
-    import tensorflow as tf
-    import keras
-    print("[ok] matplotlib:", matplotlib.__version__)
-    print("[ok] tensorflow:", tf.__version__)
-    print("[ok] keras:", keras.__version__)
-except Exception as e:
-    print("[error] Import check failed:", e)
-    raise SystemExit(1)
-PY
+def plot_curves(history, out_prefix="model"):
+    if not history:
+        print("[warn] No history dict to plot.")
+        return []
 
-echo "[ok] plot-venv setup finished."
-echo ""
-echo "To use it now, run:"
-echo "  source $VENV_DIR/bin/activate"
-echo "Then run your script:"
-echo "  python plot.py"
+    first_series = next((v for v in history.values() if hasattr(v, "__len__")), [])
+    epochs = range(1, len(first_series) + 1)
+    saved = []
+
+    if "loss" in history:
+        plt.figure()
+        plt.plot(epochs, history["loss"], label="train loss")
+        if "val_loss" in history:
+            plt.plot(epochs, history["val_loss"], label="val loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training/Validation Loss")
+        plt.legend()
+        out = f"{out_prefix}_loss.png"
+        plt.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close()
+        saved.append(out)
+        print("[ok] Saved:", out)
+
+    acc_keys = [k for k in history.keys() if "acc" in k or "accuracy" in k]
+    if acc_keys:
+        base = sorted(set(k.replace("val_", "") for k in acc_keys))
+        for m in base:
+            train_k = m
+            val_k = f"val_{m}"
+            if train_k not in history and val_k not in history:
+                continue
+            plt.figure()
+            if train_k in history:
+                plt.plot(epochs, history[train_k], label=f"train {m}")
+            if val_k in history:
+                plt.plot(epochs, history[val_k], label=f"val {m}")
+            plt.xlabel("Epoch")
+            plt.ylabel(m)
+            plt.title(f"Training/Validation {m}")
+            plt.legend()
+            out = f"{out_prefix}_{m}.png"
+            plt.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close()
+            saved.append(out)
+            print("[ok] Saved:", out)
+
+    if not saved:
+        print("[warn] No standard keys (loss/accuracy) found in history.")
+    return saved
+
+def main():
+    # Optional: pass the sessions root as the first argument
+    #   python plot_keras_history.py /your/data/root
+    # Or set SESSIONS_ROOT env var:
+    #   SESSIONS_ROOT=/your/data/root python plot_keras_history.py
+    sessions_root = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SESSIONS_ROOT
+
+    sessions = find_sessions(sessions_root)
+    if not sessions:
+        print(f"[error] No session directories found under {sessions_root} (expected names like {SESSION_PREFIX}YYYYMMDD_HHMMSS).")
+        print("Hint: Run with a custom root, e.g.:")
+        print(f"  python3 {os.path.basename(__file__)} /path/to/your/data")
+        print("or set env var:")
+        print(f"  SESSIONS_ROOT=/path/to/your/data python3 {os.path.basename(__file__)}")
+        sys.exit(1)
+
+    session_dir = pick_session_interactive(sessions)
+    model_path = find_keras_in_session(session_dir)
+    if model_path is None:
+        sys.exit(1)
+
+    model = load_model(model_path)
+    history = extract_history_from_model(model)
+
+    if history is None:
+        print("[warn] No embedded training history found in the model file.")
+        print("If you have a separate history JSON/CSV, share the path and I can adapt the script.")
+        sys.exit(0)
+
+    if isinstance(history, dict):
+        lengths = {k: len(v) for k, v in history.items() if hasattr(v, "__len__")}
+        if lengths:
+            nmax = max(lengths.values())
+            mismatched = [k for k, l in lengths.items() if l != nmax]
+            if mismatched:
+                print("[warn] History series have different lengths:", lengths)
+
+    out_prefix = os.path.splitext(os.path.basename(model_path))[0]
+    print(f"[info] Saving plots as {out_prefix}_*.png in current directory.")
+    plot_curves(history, out_prefix=out_prefix)
+
+if __name__ == "__main__":
+    main()
