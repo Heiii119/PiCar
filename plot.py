@@ -2,6 +2,8 @@
 import os
 import sys
 import glob
+import json
+import csv
 
 # Use non-interactive backend (safe over SSH/headless)
 import matplotlib
@@ -74,6 +76,68 @@ def extract_history_from_model(model):
         pass
     return None
 
+def load_history_json(json_path):
+    try:
+        with open(json_path, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {k: list(v) for k, v in data.items()}
+    except Exception as e:
+        print(f"[error] Failed to read JSON {json_path}: {e}")
+    return None
+
+def load_history_csv(csv_path):
+    try:
+        rows = []
+        with open(csv_path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+        if not rows:
+            return None
+        # Build dict of series from columns (skip 'epoch' if present)
+        keys = [k for k in rows[0].keys() if k and k.lower() != "epoch"]
+        series = {k: [] for k in keys}
+        for r in rows:
+            for k in keys:
+                v = r.get(k, "")
+                if v == "" or v is None:
+                    # pad with last value or skip; here we try to cast or leave empty
+                    continue
+                try:
+                    series[k].append(float(v))
+                except ValueError:
+                    # Non-numeric; skip
+                    pass
+        return series
+    except Exception as e:
+        print(f"[error] Failed to read CSV {csv_path}: {e}")
+        return None
+
+def find_external_history(session_dir):
+    # Prefer JSON, then CSV
+    candidates_json = [
+        os.path.join(session_dir, "history.json"),
+        os.path.join(session_dir, "training_history.json"),
+    ]
+    candidates_csv = [
+        os.path.join(session_dir, "history.csv"),
+        os.path.join(session_dir, "training_history.csv"),
+    ]
+    for p in candidates_json:
+        if os.path.isfile(p):
+            print(f"[info] Found external history JSON: {p}")
+            hist = load_history_json(p)
+            if hist:
+                return hist, os.path.splitext(os.path.basename(p))[0]
+    for p in candidates_csv:
+        if os.path.isfile(p):
+            print(f"[info] Found external history CSV: {p}")
+            hist = load_history_csv(p)
+            if hist:
+                return hist, os.path.splitext(os.path.basename(p))[0]
+    return None, None
+
 def plot_curves(history, out_prefix="model"):
     if not history:
         print("[warn] No history dict to plot.")
@@ -124,13 +188,29 @@ def plot_curves(history, out_prefix="model"):
             saved.append(out)
             print("[ok] Saved:", out)
 
+    # Plot any other numeric series
+    for k, v in history.items():
+        if k in ("loss", "val_loss") or "acc" in k or "accuracy" in k:
+            continue
+        if hasattr(v, "__len__"):
+            plt.figure()
+            plt.plot(range(1, len(v) + 1), v, label=k)
+            plt.xlabel("Epoch")
+            plt.ylabel(k)
+            plt.title(k)
+            plt.legend()
+            out = f"{out_prefix}_{k}.png"
+            plt.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close()
+            saved.append(out)
+            print("[ok] Saved:", out)
+
     if not saved:
         print("[warn] No standard keys (loss/accuracy) found in history.")
     return saved
 
 def main():
     # Optional: user can still override by passing a path or using SESSIONS_ROOT
-    # argv path gets ~ expansion; if not provided, use the hardcoded DEFAULT
     env_root = os.environ.get("SESSIONS_ROOT")
     if len(sys.argv) > 1:
         sessions_root = os.path.expanduser(sys.argv[1])
@@ -149,29 +229,46 @@ def main():
         sys.exit(1)
 
     session_dir = pick_session_interactive(sessions)
+
+    # Try to load model and history from the model file
     model_path = find_keras_in_session(session_dir)
-    if model_path is None:
-        sys.exit(1)
+    found_history = None
+    out_prefix = None
+    if model_path is not None:
+        try:
+            model = load_model(model_path)
+            found_history = extract_history_from_model(model)
+            if found_history:
+                out_prefix = os.path.splitext(os.path.basename(model_path))[0]
+        except Exception as e:
+            print(f"[warn] Could not load model or extract history: {e}")
 
-    model = load_model(model_path)
-    history = extract_history_from_model(model)
+    # If no embedded history, look for external JSON/CSV in the session folder
+    if not found_history:
+        print("[info] Model has no embedded history; searching for history.json or history.csv...")
+        found_history, base = find_external_history(session_dir)
+        if found_history and not out_prefix:
+            out_prefix = base
 
-    if history is None:
-        print("[warn] No embedded training history found in the model file.")
-        print("If you have a separate history JSON/CSV, share the path and I can adapt the script.")
+    if not found_history:
+        print("[warn] No training history found. Add a history.json or history.csv in the session folder and re-run.")
+        print("Tip: See the 'save_training_history' helper function below to generate history.json after training.")
         sys.exit(0)
 
-    if isinstance(history, dict):
-        lengths = {k: len(v) for k, v in history.items() if hasattr(v, "__len__")}
+    # Basic sanity check for inconsistent lengths
+    if isinstance(found_history, dict):
+        lengths = {k: len(v) for k, v in found_history.items() if hasattr(v, '__len__')}
         if lengths:
             nmax = max(lengths.values())
             mismatched = [k for k, l in lengths.items() if l != nmax]
             if mismatched:
                 print("[warn] History series have different lengths:", lengths)
 
-    out_prefix = os.path.splitext(os.path.basename(model_path))[0]
+    if not out_prefix:
+        out_prefix = "model"
+
     print(f"[info] Saving plots as {out_prefix}_*.png in current directory.")
-    plot_curves(history, out_prefix=out_prefix)
+    plot_curves(found_history, out_prefix=out_prefix)
 
 if __name__ == "__main__":
     main()
