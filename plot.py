@@ -46,7 +46,7 @@ def pick_session_interactive(sessions):
 def find_keras_in_session(session_dir):
     keras_files = glob.glob(os.path.join(session_dir, "*.keras"))
     if not keras_files:
-        print(f"[error] No .keras files found in: {session_dir}")
+        print(f"[info] No .keras files found in: {session_dir}")
         return None
     if len(keras_files) > 1:
         print("[info] Multiple .keras files found; using the first. To choose a specific file, move others out temporarily.")
@@ -81,6 +81,7 @@ def load_history_json(json_path):
         with open(json_path, "r") as f:
             data = json.load(f)
         if isinstance(data, dict):
+            # ensure lists
             return {k: list(v) for k, v in data.items()}
     except Exception as e:
         print(f"[error] Failed to read JSON {json_path}: {e}")
@@ -95,27 +96,47 @@ def load_history_csv(csv_path):
                 rows.append(row)
         if not rows:
             return None
-        # Build dict of series from columns (skip 'epoch' if present)
-        keys = [k for k in rows[0].keys() if k and k.lower() != "epoch"]
+
+        # Collect numeric series from all columns except obvious epoch columns
+        all_keys = [k for k in rows[0].keys() if k]
+        epoch_like = {k for k in all_keys if k.lower() in ("epoch", "epochs", "step", "steps")}
+        keys = [k for k in all_keys if k not in epoch_like]
+
         series = {k: [] for k in keys}
+        numeric_keys = set()
+
         for r in rows:
             for k in keys:
                 v = r.get(k, "")
                 if v == "" or v is None:
-                    # pad with last value or skip; here we try to cast or leave empty
                     continue
                 try:
                     series[k].append(float(v))
+                    numeric_keys.add(k)
                 except ValueError:
-                    # Non-numeric; skip
+                    # Non-numeric column (e.g., filename), ignore for metrics
                     pass
+
+        # Keep only numeric series
+        series = {k: v for k, v in series.items() if k in numeric_keys}
+        if not series:
+            print(f"[warn] CSV has no numeric metric columns. Columns detected: {all_keys}")
+            return None
+
         return series
     except Exception as e:
         print(f"[error] Failed to read CSV {csv_path}: {e}")
         return None
 
 def find_external_history(session_dir):
-    # Prefer JSON, then CSV
+    print(f"[debug] Scanning for history files in: {session_dir}")
+    try:
+        names = sorted(os.listdir(session_dir))
+        for name in names:
+            print("  -", name)
+    except Exception as e:
+        print(f"[error] Cannot list {session_dir}: {e}")
+
     candidates_json = [
         os.path.join(session_dir, "history.json"),
         os.path.join(session_dir, "training_history.json"),
@@ -123,19 +144,29 @@ def find_external_history(session_dir):
     candidates_csv = [
         os.path.join(session_dir, "history.csv"),
         os.path.join(session_dir, "training_history.csv"),
+        os.path.join(session_dir, "labels.csv"),  # also try labels.csv
     ]
+
+    # Prefer JSON
     for p in candidates_json:
         if os.path.isfile(p):
             print(f"[info] Found external history JSON: {p}")
             hist = load_history_json(p)
             if hist:
                 return hist, os.path.splitext(os.path.basename(p))[0]
+            else:
+                print(f"[warn] JSON exists but could not be parsed: {p}")
+
+    # Then CSVs (including labels.csv)
     for p in candidates_csv:
         if os.path.isfile(p):
-            print(f"[info] Found external history CSV: {p}")
+            print(f"[info] Found CSV candidate: {p}")
             hist = load_history_csv(p)
             if hist:
                 return hist, os.path.splitext(os.path.basename(p))[0]
+            else:
+                print(f"[warn] CSV exists but yielded no numeric metrics: {p}")
+
     return None, None
 
 def plot_curves(history, out_prefix="model"):
@@ -251,8 +282,8 @@ def main():
             out_prefix = base
 
     if not found_history:
-        print("[warn] No training history found. Add a history.json or history.csv in the session folder and re-run.")
-        print("Tip: See the 'save_training_history' helper function below to generate history.json after training.")
+        print("[warn] No training history found. Add a history.json or history.csv (or labels.csv with numeric columns) in the session folder and re-run.")
+        print("Tip: Use the 'save_training_history' helper in your training code to generate history.json.")
         sys.exit(0)
 
     # Basic sanity check for inconsistent lengths
