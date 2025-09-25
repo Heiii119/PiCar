@@ -9,6 +9,11 @@ camera and motor helpers from `drive_train_autopilot_picam2.py` and provides:
 - `run_autopilot` loop with keyboard override
 
 ## tensorflow installation
+# one steo installation:
+```bash 
+bash autopilot_install.sh
+```
+# step by step: 
 ```bash
 uname -m 
 ```
