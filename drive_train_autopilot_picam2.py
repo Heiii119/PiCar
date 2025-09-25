@@ -26,10 +26,10 @@ from tensorflow.keras import layers, models, optimizers
 # Configuration (from your spec)
 # ------------------------------
 PWM_STEERING_THROTTLE = {
-    "PWM_STEERING_PIN": "PCA9685.1:40.1",
+    "PWM_STEERING_PIN": "PCA9685.1:0x40.1",
     "PWM_STEERING_SCALE": 1.0,
     "PWM_STEERING_INVERTED": False,
-    "PWM_THROTTLE_PIN": "PCA9685.1:40.0",
+    "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",
     "PWM_THROTTLE_SCALE": 1.0,
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 460,
