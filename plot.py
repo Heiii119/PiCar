@@ -1,53 +1,62 @@
 #!/usr/bin/env python3
 import os
-import json
-import glob
 import sys
+import glob
 
 # Use non-interactive backend (safe over SSH/headless)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-def find_keras_file(data_dir="/data"):
-    files = glob.glob(os.path.join(data_dir, "*.keras"))
-    if not files:
-        print(f"No .keras files found in {data_dir}")
-        sys.exit(1)
-    if len(files) > 1:
-        print("Multiple .keras files found:")
-        for f in files:
-            print(" -", f)
-        print("Specify one with: python plot_keras_history.py /data/your_model.keras")
-        sys.exit(1)
-    return files[0]
+SESSIONS_ROOT = "/data"
+SESSION_PREFIX = "session_"
+
+def find_sessions(root=SESSIONS_ROOT, prefix=SESSION_PREFIX):
+    if not os.path.isdir(root):
+        print(f"[error] Sessions root not found: {root}")
+        return []
+    sessions = []
+    for name in sorted(os.listdir(root)):
+        full = os.path.join(root, name)
+        if os.path.isdir(full) and name.startswith(prefix):
+            sessions.append(full)
+    return sessions
+
+def pick_session_interactive(sessions):
+    print("Available sessions:")
+    for i, s in enumerate(sessions, 1):
+        print(f" [{i}] {s}")
+    while True:
+        choice = input(f"Choose a session [1-{len(sessions)}]: ").strip()
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(sessions):
+                return sessions[idx - 1]
+        print("Invalid choice, try again.")
+
+def find_keras_in_session(session_dir):
+    keras_files = glob.glob(os.path.join(session_dir, "*.keras"))
+    if not keras_files:
+        print(f"[error] No .keras files found in: {session_dir}")
+        return None
+    if len(keras_files) > 1:
+        print("[info] Multiple .keras files found; using the first. To choose a specific file, move others out temporarily.")
+        for f in keras_files:
+            print("  -", f)
+    return keras_files[0]
 
 def load_model(path):
-    # Lazy import to avoid heavy load when just listing files
-    import tensorflow as tf
     from tensorflow import keras
-    print(f"Loading model from: {path}")
-    model = keras.models.load_model(path)
-    return model
+    print(f"[info] Loading model: {path}")
+    return keras.models.load_model(path)
 
 def extract_history_from_model(model):
-    """
-    Try several places:
-    - model.history (rare after loading)
-    - model._training_history (custom attr)
-    - model.get_config() metadata (custom embedding)
-    Returns dict or None.
-    """
-    # 1) Direct attribute
+    # Try common places to find training history embedded with the model
     hist = getattr(model, "history", None)
-    if hist and hasattr(hist, "history"):
+    if hist is not None and hasattr(hist, "history"):
         return hist.history
-
-    # 2) Custom attribute dict
     if hasattr(model, "_training_history") and isinstance(model._training_history, dict):
         return model._training_history
-
-    # 3) Config-embedded
     try:
         cfg = model.get_config()
         if isinstance(cfg, dict):
@@ -56,25 +65,19 @@ def extract_history_from_model(model):
                     return cfg[key]
     except Exception:
         pass
-
     return None
 
 def plot_curves(history, out_prefix="model"):
-    """
-    history is a dict from Keras History.history
-    Keys usually include: loss, val_loss, accuracy, val_accuracy, etc.
-    """
     if not history:
-        print("No history dict to plot.")
+        print("[warn] No history dict to plot.")
         return []
 
-    # Determine epoch count from the first metric list
+    # Determine epoch count
     first_series = next((v for v in history.values() if hasattr(v, "__len__")), [])
     epochs = range(1, len(first_series) + 1)
-
     saved = []
 
-    # Loss curves
+    # Loss
     if "loss" in history:
         plt.figure()
         plt.plot(epochs, history["loss"], label="train loss")
@@ -84,17 +87,17 @@ def plot_curves(history, out_prefix="model"):
         plt.ylabel("Loss")
         plt.title("Training/Validation Loss")
         plt.legend()
-        loss_png = f"{out_prefix}_loss.png"
-        plt.savefig(loss_png, dpi=150, bbox_inches="tight")
+        out = f"{out_prefix}_loss.png"
+        plt.savefig(out, dpi=150, bbox_inches="tight")
         plt.close()
-        saved.append(loss_png)
-        print("Saved:", loss_png)
+        saved.append(out)
+        print("[ok] Saved:", out)
 
-    # Accuracy curves (several possible metric names)
+    # Accuracy-like metrics
     acc_keys = [k for k in history.keys() if "acc" in k or "accuracy" in k]
     if acc_keys:
-        base_metrics = set(k.replace("val_", "") for k in acc_keys)
-        for m in sorted(base_metrics):
+        base = sorted(set(k.replace("val_", "") for k in acc_keys))
+        for m in base:
             train_k = m
             val_k = f"val_{m}"
             if train_k not in history and val_k not in history:
@@ -108,49 +111,47 @@ def plot_curves(history, out_prefix="model"):
             plt.ylabel(m)
             plt.title(f"Training/Validation {m}")
             plt.legend()
-            acc_png = f"{out_prefix}_{m}.png"
-            plt.savefig(acc_png, dpi=150, bbox_inches="tight")
+            out = f"{out_prefix}_{m}.png"
+            plt.savefig(out, dpi=150, bbox_inches="tight")
             plt.close()
-            saved.append(acc_png)
-            print("Saved:", acc_png)
+            saved.append(out)
+            print("[ok] Saved:", out)
 
     if not saved:
-        print("No standard keys (loss/accuracy) found in history to plot.")
+        print("[warn] No standard keys (loss/accuracy) found in history.")
     return saved
 
 def main():
-    # Optional arg: explicit model path
-    model_path = None
-    if len(sys.argv) > 1:
-        model_path = sys.argv[1]
-        if not os.path.exists(model_path):
-            print(f"Path not found: {model_path}")
-            sys.exit(1)
-    else:
-        model_path = find_keras_file("/data")
+    # Always list sessions under /data and prompt user
+    sessions = find_sessions()
+    if not sessions:
+        print(f"[error] No session directories found under {SESSIONS_ROOT} (expected names like {SESSION_PREFIX}YYYYMMDD_HHMMSS).")
+        sys.exit(1)
+
+    session_dir = pick_session_interactive(sessions)
+    model_path = find_keras_in_session(session_dir)
+    if model_path is None:
+        sys.exit(1)
 
     model = load_model(model_path)
     history = extract_history_from_model(model)
 
     if history is None:
-        print("No embedded training history found in the model file.")
-        print("If you have a saved history JSON/CSV, share its path and I’ll adapt the script.")
-        return
+        print("[warn] No embedded training history found in the model file.")
+        print("If you have a separate history JSON/CSV, share the path and I can adapt the script.")
+        sys.exit(0)
 
-    # Basic validation of history dict
-    if not isinstance(history, dict):
-        print("History found but not a dict. Type:", type(history))
-        return
-
-    # Warn if series lengths differ
-    lengths = {k: len(v) for k, v in history.items() if hasattr(v, "__len__")}
-    if lengths:
-        n = max(lengths.values())
-        mismatched = [k for k, l in lengths.items() if l != n]
-        if mismatched:
-            print("Warning: history series have different lengths:", lengths)
+    # Validate history lengths
+    if isinstance(history, dict):
+        lengths = {k: len(v) for k, v in history.items() if hasattr(v, "__len__")}
+        if lengths:
+            nmax = max(lengths.values())
+            mismatched = [k for k, l in lengths.items() if l != nmax]
+            if mismatched:
+                print("[warn] History series have different lengths:", lengths)
 
     out_prefix = os.path.splitext(os.path.basename(model_path))[0]
+    print(f"[info] Saving plots as {out_prefix}_*.png in current directory.")
     plot_curves(history, out_prefix=out_prefix)
 
 if __name__ == "__main__":
