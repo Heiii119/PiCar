@@ -6,10 +6,9 @@ from libcamera import Transform
 def main():
     picam2 = Picamera2()
 
-    # Dual-stream: main for capture, preview for on-screen window
+    # Older API: only pass main; do not pass "preview" keyword
     config = picam2.create_preview_configuration(
-        main={"size": (160, 120), "format": "RGB888"},
-        preview={"size": (640, 480), "format": "XBGR8888"},  # if it fails, try "XRGB8888"
+        main={"size": (640, 480), "format": "XBGR8888"},  # if this fails, try "XRGB8888" or omit format
         transform=Transform(hflip=False, vflip=False)
     )
     picam2.configure(config)
