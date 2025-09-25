@@ -22,12 +22,20 @@ pip install "Send2Trash>=1.8.2"
 pip install --no-cache-dir tensorflow-aarch64==2.16.1
 python -c "import tensorflow as tf; print(tf.version); print(tf.config.list_physical_devices('CPU'))"
 ```
+
+If adafruit_pca9685 failed: 
 ```bash
 pip install Adafruit-Blinka adafruit-circuitpython-busdevice adafruit-circuitpython-pca9685 adafruit-circuitpython-motor adafruit-circuitpython-servokit
 ```
+If libcamera failed: 
 ```bash
 sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps libgpiod2
 sudo apt update && sudo apt install -y i2c-tools
+```
+If I2C not present:
+```bash 
+sudo apt-get update
+sudo apt-get install -y python3-pip python3-dev python3-venv i2c-tools
 ```
 ```bash
 sudo raspi-config # enable I2C and SPI
@@ -38,11 +46,13 @@ sudo usermod -aG gpio,i2c,spi,video $USER
 ```bash
 sudo reboot
 ```
-verify
+## verify
 ```bash
 source tf-venv/bin/activate
 python -c "import board, busio; print('board OK:', hasattr(board, 'SCL'))"
+python -c "import adafruit_pca9685; print('OK')"
 python -c "from picamera2 import Picamera2; print('picamera2 OK')"
+i2cdetect -y 1
 ```
 
 
