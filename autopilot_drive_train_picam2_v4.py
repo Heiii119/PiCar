@@ -146,7 +146,7 @@ class KeyboardDriver:
         self.steering = 0.0
         self.throttle = 0.0
         self.steering_step = 0.1
-               self.throttle_step = 0.1
+        self.throttle_step = 0.1
         self.manual_quit = False
 
     def handle_char(self, ch):
