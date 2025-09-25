@@ -8,7 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-SESSIONS_ROOT = "/data"
+SESSIONS_ROOT = "~/PiCar/data"
 SESSION_PREFIX = "session_"
 
 def find_sessions(root=SESSIONS_ROOT, prefix=SESSION_PREFIX):
