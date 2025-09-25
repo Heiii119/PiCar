@@ -50,7 +50,7 @@ sudo reboot
 ```bash
 source tf-venv/bin/activate
 python -c "import board, busio; print('board OK:', hasattr(board, 'SCL'))"
-python -c "import adafruit_pca9685; print('OK')"
+python -c "import adafruit_pca9685; print('adafruit_pca9685 OK')"
 python -c "from picamera2 import Picamera2; print('picamera2 OK')"
 i2cdetect -y 1
 ```
