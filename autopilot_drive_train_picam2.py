@@ -448,6 +448,12 @@ def preview_and_record():
         ctrl.stop()
         ctrl.close()
     return session_root
+# place this near other small helpers or inside train_model_on_session before model.fit
+def _ask_int(prompt, default):
+    s = input(f"{prompt} [{default}]: ").strip()
+    if s.isdigit():
+        return int(s)
+return default
 
 def train_model_on_session(session_root):
     if session_root is None:
@@ -474,20 +480,13 @@ def train_model_on_session(session_root):
     X_val, y_val = X[n_train:], y[n_train:]
 
     model = build_model((IMAGE_H, IMAGE_W, IMAGE_DEPTH))
+    epochs = _ask_int("Enter number of training epochs", 30)
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")]
 
-    # place this near other small helpers or inside train_model_on_session before model.fit
-    def _ask_int(prompt, default):
-        s = input(f"{prompt} [{default}]: ").strip()
-        if s.isdigit():
-            return int(s)
-    return default
-    # ask user for epochs instead of hardcoding 30
-    epochs = _ask_int("Enter number of training epochs", 30)
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs= epochs,
+        epochs=epochs,
         batch_size=32,
         callbacks=callbacks,
         verbose=1
