@@ -453,7 +453,7 @@ def _ask_int(prompt, default):
     s = input(f"{prompt} [{default}]: ").strip()
     if s.isdigit():
         return int(s)
-return default
+    return default
 
 def train_model_on_session(session_root):
     if session_root is None:
