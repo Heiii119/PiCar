@@ -40,7 +40,7 @@ PWM_STEERING_THROTTLE = {
     "THROTTLE_REVERSE_PWM": 220,
 }
 
-DRIVE_LOOP_HZ = 20
+DRIVE_LOOP_HZ = 50
 MAX_LOOPS = None
 
 IMAGE_W = 160
@@ -142,8 +142,8 @@ class KeyboardDriver:
     def __init__(self):
         self.steering = 0.0
         self.throttle = 0.0
-        self.steering_step = 0.1
-        self.throttle_step = 0.1
+        self.steering_step = 0.25
+        self.throttle_step = 0.15
         self.manual_quit = False
 
     def handle_char(self, ch):
