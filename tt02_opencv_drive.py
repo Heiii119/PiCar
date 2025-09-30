@@ -56,8 +56,8 @@ THROTTLE_FORWARD_PWM   = 400
 
 # STEERING endpoints (12-bit ticks at 60 Hz per user request)
 STEERING_CHANNEL     = 1
-STEERING_RIGHT_PWM   = 240
-STEERING_LEFT_PWM    = 370
+STEERING_RIGHT_PWM   = 200
+STEERING_LEFT_PWM    = 410
 
 # How long to treat key as "held" after last repeat (seconds)
 KEY_HOLD_TIMEOUT = 0.20
