@@ -30,7 +30,7 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 PWM_STEERING_THROTTLE = {
     "PWM_STEERING_PIN": "PCA9685.1:0x40.1",  # ensure 0x40
     "PWM_STEERING_SCALE": 1.0,
-    "PWM_STEERING_INVERTED": False,
+    "PWM_STEERING_INVERTED": True,
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # ensure 0x40
     "PWM_THROTTLE_SCALE": 1.0,
     "PWM_THROTTLE_INVERTED": False,
