@@ -812,7 +812,7 @@ def autopilot_loop(model_path):
             kb = global_kb
             print("\n=== Autopilot Controls ===")
             print("h = Switch to manual mode")
-            print("a = Switch to autopilot mode")
+            print("p = Switch to autopilot mode")
             print("q = Quit")
             print("Space = Emergency stop")
             print("c = Center steering")
@@ -832,7 +832,7 @@ def autopilot_loop(model_path):
                 if ch == 'h':
                     manual_override = True
                     print("\n>>> Switched to MANUAL mode")
-                elif ch == 'a':
+                elif ch == 'p':
                     manual_override = False
                     print("\n>>> Switched to AUTOPILOT mode")
                 elif ch == ' ':
