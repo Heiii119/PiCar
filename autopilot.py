@@ -4,9 +4,6 @@
 # - Prints camera status and steering/throttle PWM periodically
 # - Keyboard controls via terminal (WASD/arrows; space stop; c center; r record; q quit)
 # - Simple record/train/autopilot pipeline
-#
-# Tip: run with unbuffered output for easier debugging:
-#   python3 -u autopilot.py
 
 import os
 import sys
@@ -348,7 +345,6 @@ class PiCam2Manager:
 
         main_w = max(640, width)
         main_h = max(480, height)
-        # Use RGB888 for easy numpy handling; no preview started
         self.config = self.picam2.create_preview_configuration(
             main={"size": (main_w, main_h), "format": "RGB888"},
             transform=transform
@@ -360,7 +356,6 @@ class PiCam2Manager:
 
     def capture_rgb(self):
         arr = self.picam2.capture_array()
-        # If format ever returns 4 channels, drop alpha
         if arr.ndim == 3 and arr.shape[2] > 3:
             arr = arr[:, :, :3]
         if arr.shape[1] != self.capture_resize[0] or arr.shape[0] != self.capture_resize[1]:
