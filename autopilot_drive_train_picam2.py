@@ -40,13 +40,14 @@ PWM_STEERING_THROTTLE = {
     "THROTTLE_REVERSE_PWM": 220,
 }
 
-DRIVE_LOOP_HZ = 50
+# Increase loop rate for better responsiveness
+DRIVE_LOOP_HZ = 120
 MAX_LOOPS = None
 
 IMAGE_W = 160
 IMAGE_H = 120
 IMAGE_DEPTH = 3
-CAMERA_FRAMERATE = DRIVE_LOOP_HZ
+CAMERA_FRAMERATE = 30  # keep camera moderate; control loop is faster
 CAMERA_VFLIP = False
 CAMERA_HFLIP = False
 
@@ -56,7 +57,7 @@ DATA_ROOT = "data"
 # Utility: PCA9685 helper
 # ------------------------------
 def parse_pca9685_pin(pin_str):
-    # Format "PCA9685.<bus>:<addr>.<channel>", e.g. "PCA9685.1:0x40.1"
+    # Format "PCA9685.<bus>:0x<addr>.<channel>", e.g. "PCA9685.1:0x40.1"
     try:
         left, chan = pin_str.split(":")
         bus_str = left.split(".")[1]
@@ -99,6 +100,7 @@ class MotorServoController:
             steer_norm = -steer_norm
         pwm = int(np.interp(steer_norm, [-1, 1], [right, left]))
         self.set_pwm_raw(self.channel_steer, pwm)
+        return pwm
 
     def set_throttle(self, throttle_norm):
         if self.cfg["PWM_THROTTLE_INVERTED"]:
@@ -108,6 +110,7 @@ class MotorServoController:
         fwd = self.cfg["THROTTLE_FORWARD_PWM"]
         pwm = int(np.interp(throttle_norm, [-1, 0, 1], [rev, stop, fwd]))
         self.set_pwm_raw(self.channel_throttle, pwm)
+        return pwm
 
     def stop(self):
         self.set_throttle(0.0)
@@ -142,8 +145,9 @@ class KeyboardDriver:
     def __init__(self):
         self.steering = 0.0
         self.throttle = 0.0
-        self.steering_step = 0.25
-        self.throttle_step = 0.1
+        # Snappier steps; throttle now 0.5 per key press as requested
+        self.steering_step = 0.35
+        self.throttle_step = 0.50
         self.manual_quit = False
 
     def handle_char(self, ch):
@@ -173,7 +177,7 @@ class KeyboardDriver:
         if ch == '\x1b':
             seq = ''
             for _ in range(2):
-                nxt = kb.get_key(timeout=0.001)
+                nxt = kb.get_key(timeout=0.0)
                 if nxt:
                     seq += nxt
             if seq == '[D':
@@ -393,20 +397,25 @@ def preview_and_record():
     csv_path = None
     frame_idx = 0
     period = 1.0 / DRIVE_LOOP_HZ
-    last_loop = time.time()
+    next_t = time.time()
 
     ctrl.stop()
-    time.sleep(2.0)
+    time.sleep(0.3)
 
     try:
         with RawKeyboard() as global_kb:
             global kb
             kb = global_kb
             print("Drive with WASD/Arrows; space=stop; c=center; r=record toggle; q=quit.")
+            loops = 0
             while True:
-                frame_rgb = cam.capture_rgb()
-
+                # Poll keyboard aggressively and handle immediately
                 ch = kb.get_key(timeout=0.0)
+                for _ in range(2):
+                    ch2 = kb.get_key(timeout=0.0)
+                    if ch2:
+                        ch = ch2
+
                 if ch == 'r':
                     if session_root is None:
                         session_root = create_session_dir()
@@ -424,9 +433,14 @@ def preview_and_record():
                 if driver.manual_quit:
                     break
 
-                ctrl.set_steering(driver.steering)
-                ctrl.set_throttle(driver.throttle)
+                # Apply control immediately (do not block on camera)
+                steer_pwm = ctrl.set_steering(driver.steering)
+                thr_pwm = ctrl.set_throttle(driver.throttle)
 
+                # Capture only after control is applied
+                frame_rgb = cam.capture_rgb()
+
+                # Save frame if recording
                 if session_root is not None:
                     img_name = f"{frame_idx:06d}.jpg"
                     img_path = os.path.join(session_root, "images", img_name)
@@ -435,11 +449,17 @@ def preview_and_record():
                     append_label(csv_path, img_name, driver.steering, driver.throttle)
                     frame_idx += 1
 
-                now = time.time()
-                dt = now - last_loop
-                if dt < period:
-                    time.sleep(period - dt)
-                last_loop = time.time()
+                # Maintain precise loop timing
+                next_t += period
+                sleep_t = next_t - time.time()
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+                else:
+                    next_t = time.time()
+
+                loops += 1
+                if MAX_LOOPS is not None and loops >= MAX_LOOPS:
+                    break
     finally:
         try:
             cam.stop()
@@ -448,6 +468,7 @@ def preview_and_record():
         ctrl.stop()
         ctrl.close()
     return session_root
+
 # place this near other small helpers or inside train_model_on_session before model.fit
 def _ask_int(prompt, default):
     s = input(f"{prompt} [{default}]: ").strip()
@@ -518,13 +539,13 @@ def autopilot_loop(model_path):
     cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP, with_preview=True)
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     period = 1.0 / DRIVE_LOOP_HZ
-    last_loop = time.time()
+    next_t = time.time()
 
     manual_override = False
     driver = KeyboardDriver()
 
     ctrl.stop()
-    time.sleep(2.0)
+    time.sleep(0.3)
 
     try:
         with RawKeyboard() as global_kb:
@@ -532,9 +553,13 @@ def autopilot_loop(model_path):
             kb = global_kb
             print("Autopilot running. h=manual, a=auto, q=quit. Space stop, c center; WASD in manual.")
             while True:
-                frame_rgb = cam.capture_rgb()
-
+                # Poll keys multiple times per loop
                 ch = kb.get_key(timeout=0.0)
+                for _ in range(2):
+                    ch2 = kb.get_key(timeout=0.0)
+                    if ch2:
+                        ch = ch2
+
                 if ch == 'q':
                     break
                 if ch == 'h':
@@ -545,23 +570,28 @@ def autopilot_loop(model_path):
                     if manual_override:
                         driver.handle_char(ch)
 
-                if not manual_override:
+                # Apply manual control immediately if in manual
+                if manual_override:
+                    steer = driver.steering
+                    thr = driver.throttle
+                else:
+                    # Capture and infer when in auto
+                    frame_rgb = cam.capture_rgb()
                     inp = np.expand_dims(load_image_for_model(frame_rgb), axis=0)
                     pred = model.predict(inp, verbose=0)[0]
                     steer = float(np.clip(pred[0], -1, 1))
                     thr = float(np.clip(pred[1], -1, 1))
-                else:
-                    steer = driver.steering
-                    thr = driver.throttle
 
                 ctrl.set_steering(steer)
                 ctrl.set_throttle(thr)
 
-                now = time.time()
-                dt = now - last_loop
-                if dt < period:
-                    time.sleep(period - dt)
-                last_loop = time.time()
+                # Maintain precise loop timing
+                next_t += period
+                sleep_t = next_t - time.time()
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+                else:
+                    next_t = time.time()
     finally:
         try:
             cam.stop()
