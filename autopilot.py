@@ -166,7 +166,7 @@ class KeyboardDriver:
         self.throttle = 0.0
         # Tap responsiveness
         self.steering_step = 0.45
-        self.throttle_step = 0.50  # throttle +/-0.50 per key press
+        self.throttle_step = 0.05  # throttle +/-0.50 per key press
         self.manual_quit = False
     def handle_char(self, ch):
         if ch is None:
