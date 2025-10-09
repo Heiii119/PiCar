@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# Meta Dot PiCar Control (Headless, ultra-responsive)
+# Meta Dot PiCar Control (Headless, ultra-responsive, with status)
 # - Decoupled control (250 Hz) and camera (25 Hz) loops
+# - No preview window
 # - Keyboard handled aggressively; PWM updates immediately
 # - Smaller camera stream; no blocking on capture during control
-# - Keyboard controls: WASD/arrows; space stop; c center; r record; q quit
+# - Keyboard: WASD/arrows; space stop; c center; r record; h manual; a auto; q quit
 #
 # Suggested run:
 #   LIBCAMERA_LOG_LEVELS=*:2 python3 -u autopilot.py
@@ -165,7 +166,7 @@ class KeyboardDriver:
         self.throttle = 0.0
         # Tap responsiveness
         self.steering_step = 0.45
-        self.throttle_step = 0.50  # updated: throttle increases/decreases by 0.5 per key press
+        self.throttle_step = 0.50  # throttle +/-0.50 per key press
         self.manual_quit = False
     def handle_char(self, ch):
         if ch is None:
@@ -325,7 +326,7 @@ def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
     return model
 
 # ------------------------------
-# Camera thread
+# Camera thread (headless)
 # ------------------------------
 class CameraThread(threading.Thread):
     def __init__(self, hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP):
@@ -397,7 +398,7 @@ class StatusPrinter:
                   f"PWM(s,t)=({steer_pwm},{thr_pwm})", flush=True)
 
 # ------------------------------
-# Main routines (decoupled loops)
+# Main routines (headless, decoupled loops)
 # ------------------------------
 def preview_and_record_headless():
     print("Drive headless: r=record, q=quit, space=stop, c=center, WASD/arrows.", flush=True)
@@ -423,6 +424,7 @@ def preview_and_record_headless():
             kb = global_kb
             loops = 0
             while True:
+                # Aggressive key polling
                 ch = kb.get_key(timeout=0.0)
                 for _ in range(3):
                     ch2 = kb.get_key(timeout=0.0)
@@ -446,9 +448,11 @@ def preview_and_record_headless():
                 if driver.manual_quit or ch == 'q':
                     break
 
+                # Update PWM immediately
                 steer_pwm = ctrl.set_steering(driver.steering)
                 thr_pwm = ctrl.set_throttle(driver.throttle)
 
+                # Save latest frame if recording
                 if session_root is not None:
                     frame_rgb = cam_th.get_latest()
                     if frame_rgb is not None:
@@ -459,11 +463,13 @@ def preview_and_record_headless():
                         append_label(csv_path, img_name, driver.steering, driver.throttle)
                         frame_idx += 1
 
+                # Status once per second
                 printer.maybe_print(camera_ok=(cam_th.get_latest() is not None),
                                     steer_norm=driver.steering, thr_norm=driver.throttle,
                                     steer_pwm=steer_pwm, thr_pwm=thr_pwm,
                                     recording=(session_root is not None))
 
+                # Pace control loop
                 next_t += control_period
                 sleep_t = next_t - time.time()
                 if sleep_t > 0:
@@ -579,6 +585,7 @@ def autopilot_loop_headless(model_path):
                 else:
                     if manual_override:
                         driver.handle_char(ch)
+
                 frame_rgb = cam_th.get_latest()
                 if not manual_override and frame_rgb is not None:
                     inp = np.expand_dims(load_image_for_model(frame_rgb), axis=0)
@@ -588,12 +595,15 @@ def autopilot_loop_headless(model_path):
                 else:
                     steer = driver.steering
                     thr = driver.throttle
+
                 steer_pwm = ctrl.set_steering(steer)
                 thr_pwm = ctrl.set_throttle(thr)
+
                 printer.maybe_print(camera_ok=(frame_rgb is not None),
                                     steer_norm=steer, thr_norm=thr,
                                     steer_pwm=steer_pwm, thr_pwm=thr_pwm,
                                     recording=False)
+
                 next_t += control_period
                 sleep_t = next_t - time.time()
                 if sleep_t > 0:
