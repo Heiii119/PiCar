@@ -4,7 +4,7 @@
 # - No preview window
 # - Status prints: camera OK, recording, steer/throttle normals and PWMs
 # - Keyboard: WASD/arrows; space stop; c center; r record; h manual; a auto; q quit
-# - Lighter training: smaller CNN, no dropout, fixed 5 epochs, smaller batch size (8)
+# - Lighter training: smaller CNN, fixed 5 epochs, smaller batch size (8)
 #
 # Suggested run:
 #   LIBCAMERA_LOG_LEVELS=*:2 python3 -u autopilot.py
@@ -45,8 +45,8 @@ PWM_STEERING_THROTTLE = {
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # ensure 0x40
     "PWM_THROTTLE_SCALE": 1.0,
     "PWM_THROTTLE_INVERTED": False,
-    "STEERING_LEFT_PWM": 290,
-    "STEERING_RIGHT_PWM": 460,
+    "STEERING_LEFT_PWM": 280,
+    "STEERING_RIGHT_PWM": 470,
     "THROTTLE_FORWARD_PWM": 500,
     "THROTTLE_STOPPED_PWM": 370,
     "THROTTLE_REVERSE_PWM": 220,
@@ -311,7 +311,7 @@ def load_dataset(session_root):
 # Model (lighter to reduce RAM)
 # ------------------------------
 def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
-    # Reduced filters: 16->8, 32->16, 64->32, and removed Dropout to save memory/compute
+    # Reduced filters to lighten memory/compute; keep capacity reasonable
     model = models.Sequential([
         layers.Input(shape=input_shape),
         layers.Rescaling(1./255),
@@ -486,10 +486,20 @@ def preview_and_record_headless():
             cam_th.stop()
         except Exception:
             pass
-        ctrl.stop()
-        ctrl.close()
-        del cam_th
-        del ctrl
+        try:
+            ctrl.stop()
+            ctrl.close()
+        except Exception:
+            pass
+        # Drop references to free RAM
+        try:
+            del cam_th
+        except Exception:
+            pass
+        try:
+            del ctrl
+        except Exception:
+            pass
     return session_root
 
 def quick_test_headless(duration_sec=5):
@@ -594,4 +604,103 @@ def autopilot_loop_headless(model_path):
                 for _ in range(3):
                     ch2 = kb.get_key(timeout=0.0)
                     if ch2:
-                       
+                        ch = ch2
+
+                if ch == 'q':
+                    break
+                if ch == 'h':
+                    manual_override = True
+                elif ch == 'a':
+                    manual_override = False
+                else:
+                    if manual_override:
+                        driver.handle_char(ch)
+
+                frame_rgb = cam_th.get_latest()
+                if not manual_override and frame_rgb is not None:
+                    inp = np.expand_dims(load_image_for_model(frame_rgb), axis=0)
+                    pred = model.predict(inp, verbose=0)[0]
+                    steer = float(np.clip(pred[0], -1, 1))
+                    thr = float(np.clip(pred[1], -1, 1))
+                else:
+                    steer = driver.steering
+                    thr = driver.throttle
+
+                steer_pwm = ctrl.set_steering(steer)
+                thr_pwm = ctrl.set_throttle(thr)
+
+                printer.maybe_print(camera_ok=(frame_rgb is not None),
+                                    steer_norm=steer, thr_norm=thr,
+                                    steer_pwm=steer_pwm, thr_pwm=thr_pwm,
+                                    recording=False)
+
+                next_t += control_period
+                sleep_t = next_t - time.time()
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+                else:
+                    next_t = time.time()
+    finally:
+        try:
+            cam_th.stop()
+        except Exception:
+            pass
+        try:
+            ctrl.stop()
+            ctrl.close()
+        except Exception:
+            pass
+
+# ------------------------------
+# Small helpers
+# ------------------------------
+def _ask_int(prompt, default):
+    s = input(f"{prompt} [{default}]: ").strip()
+    if s.isdigit():
+        return int(s)
+    return default
+
+def train_from_existing_session():
+    session = select_session_interactive("Select a session to train from existing data:")
+    if session is None:
+        print("Cancelled.")
+        return None
+    return train_model_on_session(session)
+
+def run_autopilot_from_existing_model():
+    model_path = select_model_from_any_session()
+    if model_path is None:
+        print("Cancelled.")
+        return
+    autopilot_loop_headless(model_path)
+
+# ------------------------------
+# Main menu
+# ------------------------------
+def main():
+    print("Meta Dot PiCar Control (Headless, ultra-responsive)", flush=True)
+    ensure_dir(DATA_ROOT)
+    print("1) Drive headless, optionally record a new session")
+    print("2) Train model on a recorded session (from data/)")
+    print("3) Run autopilot headless using an existing trained model (from data/)")
+    print("q) Quit")
+    try:
+        choice = input("Select an option: ").strip().lower()
+    except EOFError:
+        print("No TTY detected. Quick test:\n  python3 -u -c \"import autopilot; autopilot.quick_test_headless(5)\"",
+              flush=True)
+        return
+    if choice == "1":
+        session_root = preview_and_record_headless()
+        print(f"Finished driving. Session: {session_root}")
+    elif choice == "2":
+        _ = train_from_existing_session()
+    elif choice == "3":
+        run_autopilot_from_existing_model()
+    elif choice == "q":
+        print("Bye.")
+    else:
+        print("Unknown option.")
+
+if __name__ == "__main__":
+    main()
