@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+# Meta Dot PiCar Control (Headless, responsive, no preview)
+# - No on-screen preview
+# - Keyboard controls: WASD/arrows; space stop; c center; r record; q quit
+# - Control loop at 120 Hz; camera capture at ~30 Hz
+# - Throttle step = 0.50 per key press
+
 import os
 import sys
 import time
@@ -11,7 +18,7 @@ from glob import glob
 import numpy as np
 
 # Picamera2
-from picamera2 import Picamera2, Preview
+from picamera2 import Picamera2
 from libcamera import Transform
 
 # PWM / PCA9685
@@ -40,14 +47,14 @@ PWM_STEERING_THROTTLE = {
     "THROTTLE_REVERSE_PWM": 220,
 }
 
-# Increased loop rate and decoupled control timing for snappier feel
+# Control and camera loop rates
 DRIVE_LOOP_HZ = 120
+CAMERA_FRAMERATE = 30
 MAX_LOOPS = None
 
 IMAGE_W = 160
 IMAGE_H = 120
 IMAGE_DEPTH = 3
-CAMERA_FRAMERATE = 30  # camera at moderate rate; control loop is faster
 CAMERA_VFLIP = False
 CAMERA_HFLIP = False
 
@@ -92,6 +99,7 @@ class MotorServoController:
         pwm_value = int(np.clip(pwm_value, 0, 4095))
         duty16 = int((pwm_value / 4095.0) * 65535)
         self.pca.channels[channel].duty_cycle = duty16
+        return pwm_value
 
     def set_steering(self, steer_norm):
         left = self.cfg["STEERING_LEFT_PWM"]
@@ -99,8 +107,7 @@ class MotorServoController:
         if self.cfg["PWM_STEERING_INVERTED"]:
             steer_norm = -steer_norm
         pwm = int(np.interp(steer_norm, [-1, 1], [right, left]))
-        self.set_pwm_raw(self.channel_steer, pwm)
-        return pwm
+        return self.set_pwm_raw(self.channel_steer, pwm)
 
     def set_throttle(self, throttle_norm):
         if self.cfg["PWM_THROTTLE_INVERTED"]:
@@ -109,8 +116,7 @@ class MotorServoController:
         stop = self.cfg["THROTTLE_STOPPED_PWM"]
         fwd = self.cfg["THROTTLE_FORWARD_PWM"]
         pwm = int(np.interp(throttle_norm, [-1, 0, 1], [rev, stop, fwd]))
-        self.set_pwm_raw(self.channel_throttle, pwm)
-        return pwm
+        return self.set_pwm_raw(self.channel_throttle, pwm)
 
     def stop(self):
         self.set_throttle(0.0)
@@ -145,7 +151,7 @@ class KeyboardDriver:
     def __init__(self):
         self.steering = 0.0
         self.throttle = 0.0
-        # Snappier steps; throttle now 0.5 per key press
+        # Snappy steps; throttle now 0.50 per key press
         self.steering_step = 0.35
         self.throttle_step = 0.50
         self.manual_quit = False
@@ -308,12 +314,11 @@ def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
     return model
 
 # ------------------------------
-# Picamera2 manager with Qt windowed preview (robust)
+# Picamera2 manager (headless, no preview)
 # ------------------------------
 class PiCam2Manager:
     def __init__(self, width=IMAGE_W, height=IMAGE_H, framerate=CAMERA_FRAMERATE,
-                 hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP, with_preview=True, retries=1, delay=0.5):
-        self.with_preview = with_preview
+                 hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP, retries=1, delay=0.5):
         self.capture_resize = (IMAGE_W, IMAGE_H)
         self.picam2 = None
 
@@ -330,66 +335,39 @@ class PiCam2Manager:
 
         transform = Transform(hflip=hflip, vflip=vflip)
 
-        main_w = max(640, width)
-        main_h = max(480, height)
-        try:
-            self.config = self.picam2.create_preview_configuration(
-                main={"size": (main_w, main_h), "format": "XBGR8888"},
-                transform=transform
-            )
-        except Exception:
-            self.config = self.picam2.create_preview_configuration(
-                main={"size": (main_w, main_h), "format": "XRGB8888"},
-                transform=transform
-            )
-
+        main_w = max(320, width)
+        main_h = max(240, height)
+        # RGB format for easy numpy/PIL handling
+        self.config = self.picam2.create_preview_configuration(
+            main={"size": (main_w, main_h), "format": "RGB888"},
+            transform=transform
+        )
         self.picam2.configure(self.config)
-
-        if self.with_preview:
-            try:
-                self.picam2.start_preview(Preview.QTGL)
-            except Exception as e1:
-                print(f"Preview.QTGL failed ({e1}); trying Preview.QT ...")
-                try:
-                    self.picam2.start_preview(Preview.QT)
-                except Exception as e2:
-                    print(f"Preview.QT also failed ({e2}); preview disabled.")
-                    self.with_preview = False
-
         self.picam2.start()
         time.sleep(0.2)  # warmup
 
     def capture_rgb(self):
         arr = self.picam2.capture_array()
-        if arr.ndim == 3 and arr.shape[2] == 4:
-            b, g, r, _ = np.split(arr, 4, axis=2)
-            arr = np.concatenate([r, g, b], axis=2)
+        if arr.ndim == 3 and arr.shape[2] > 3:
+            arr = arr[:, :, :3]
         if arr.shape[1] != self.capture_resize[0] or arr.shape[0] != self.capture_resize[1]:
             from PIL import Image
             arr = np.array(Image.fromarray(arr).resize(self.capture_resize))
         return arr
 
-    def annotate(self, text):
-        pass
-
     def stop(self):
         try:
-            if self.with_preview:
-                try:
-                    self.picam2.stop_preview()
-                except Exception:
-                    pass
             self.picam2.stop()
         finally:
             self.picam2 = None
             time.sleep(0.3)
 
 # ------------------------------
-# Main routines
+# Main routines (headless control)
 # ------------------------------
 def preview_and_record():
-    print("Opening Picamera2 preview. Controls: r to start/stop recording, q to quit.")
-    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP, with_preview=True)
+    print("Headless drive. No preview. Controls: r=record toggle, q=quit, space=stop, c=center, WASD/arrows.")
+    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP)
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     driver = KeyboardDriver()
 
@@ -406,10 +384,9 @@ def preview_and_record():
         with RawKeyboard() as global_kb:
             global kb
             kb = global_kb
-            print("Drive with WASD/Arrows; space=stop; c=center; r=record toggle; q=quit.")
             loops = 0
             while True:
-                # Poll keyboard aggressively and handle immediately
+                # Poll keyboard aggressively
                 ch = kb.get_key(timeout=0.0)
                 for _ in range(2):
                     ch2 = kb.get_key(timeout=0.0)
@@ -422,9 +399,9 @@ def preview_and_record():
                         csv_path = os.path.join(session_root, "labels.csv")
                         write_labels_header(csv_path)
                         frame_idx = 0
-                        print(f"Recording started: {session_root}")
+                        print(f"[Record] Started: {session_root}")
                     else:
-                        print("Recording stopped.")
+                        print("[Record] Stopped.")
                         session_root = None
                         csv_path = None
                 else:
@@ -433,14 +410,14 @@ def preview_and_record():
                 if driver.manual_quit:
                     break
 
-                # Apply control immediately (do not block on camera)
+                # Apply control immediately
                 steer_pwm = ctrl.set_steering(driver.steering)
                 thr_pwm = ctrl.set_throttle(driver.throttle)
 
-                # Capture only after control is applied
+                # Capture after applying control
                 frame_rgb = cam.capture_rgb()
 
-                # Save frame if recording
+                # Save if recording
                 if session_root is not None:
                     img_name = f"{frame_idx:06d}.jpg"
                     img_path = os.path.join(session_root, "images", img_name)
@@ -449,7 +426,7 @@ def preview_and_record():
                     append_label(csv_path, img_name, driver.steering, driver.throttle)
                     frame_idx += 1
 
-                # Maintain precise loop timing
+                # Timing
                 next_t += period
                 sleep_t = next_t - time.time()
                 if sleep_t > 0:
@@ -503,7 +480,7 @@ def train_model_on_session(session_root):
     epochs = _ask_int("Enter number of training epochs", 30)
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")]
 
-    history = model.fit(
+    _ = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
@@ -523,9 +500,7 @@ def _robust_load_model(path):
             print("Loading legacy HDF5 model with compile=False to avoid metric deserialization issues...")
             return tf.keras.models.load_model(path, compile=False)
         return tf.keras.models.load_model(path)
-    except Exception as e:
-        print(f"Primary load failed: {e}")
-        print("Retrying with compile=False ...")
+    except Exception:
         return tf.keras.models.load_model(path, compile=False)
 
 def autopilot_loop(model_path):
@@ -535,7 +510,7 @@ def autopilot_loop(model_path):
 
     model = _robust_load_model(model_path)
 
-    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP, with_preview=True)
+    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP)
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     period = 1.0 / DRIVE_LOOP_HZ
     next_t = time.time()
@@ -550,7 +525,7 @@ def autopilot_loop(model_path):
         with RawKeyboard() as global_kb:
             global kb
             kb = global_kb
-            print("Autopilot running. h=manual, a=auto, q=quit. Space stop, c center; WASD in manual.")
+            print("Autopilot headless. h=manual, a=auto, q=quit. Space stop, c center; WASD in manual.")
             while True:
                 # Poll keys multiple times per loop
                 ch = kb.get_key(timeout=0.0)
@@ -569,7 +544,6 @@ def autopilot_loop(model_path):
                     if manual_override:
                         driver.handle_char(ch)
 
-                # Apply manual control immediately; only capture when needed
                 if manual_override:
                     steer = driver.steering
                     thr = driver.throttle
@@ -583,7 +557,7 @@ def autopilot_loop(model_path):
                 ctrl.set_steering(steer)
                 ctrl.set_throttle(thr)
 
-                # Maintain precise loop timing
+                # Timing
                 next_t += period
                 sleep_t = next_t - time.time()
                 if sleep_t > 0:
@@ -599,7 +573,7 @@ def autopilot_loop(model_path):
         ctrl.close()
 
 # ------------------------------
-# New helpers: train from previous data, run autopilot from existing model
+# Helpers to run training or autopilot from existing data
 # ------------------------------
 def train_from_existing_session():
     session = select_session_interactive("Select a session to train from existing data:")
@@ -616,15 +590,14 @@ def run_autopilot_from_existing_model():
     autopilot_loop(model_path)
 
 # ------------------------------
-# Main menu flow
+# Main menu flow (headless)
 # ------------------------------
 def main():
     ensure_dir(DATA_ROOT)
-    print("Meta Dot PiCar Control")
-    print("1) Drive, preview, and optionally record a new session")
+    print("Meta Dot PiCar Control (Headless, no preview)")
+    print("1) Drive headless and optionally record a new session")
     print("2) Train model on a previously recorded session (from data/)")
-    print("3) Run autopilot using an existing trained model (from data/)")
-    print("4) Drive & record, then train immediately, then autopilot")
+    print("3) Run autopilot headless using an existing trained model (from data/)")
     print("q) Quit")
 
     choice = input("Select an option: ").strip().lower()
@@ -635,17 +608,6 @@ def main():
         _ = train_from_existing_session()
     elif choice == "3":
         run_autopilot_from_existing_model()
-    elif choice == "4":
-        session_root = preview_and_record()
-        if session_root:
-            ans = input("Train model on recorded session? [y/N]: ").strip().lower()
-            model_path = None
-            if ans == "y":
-                model_path = train_model_on_session(session_root)
-            if model_path:
-                ans2 = input("Run autopilot now? [y/N]: ").strip().lower()
-                if ans2 == "y":
-                    autopilot_loop(model_path)
     elif choice == "q":
         print("Bye.")
     else:
