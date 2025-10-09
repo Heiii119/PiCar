@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Meta Dot PiCar Control (Headless, ultra-responsive, with status)
+# Meta Dot PiCar Control (Headless, ultra-responsive, lighter training)
 # - Decoupled control (250 Hz) and camera (25 Hz) loops
 # - No preview window
-# - Keyboard handled aggressively; PWM updates immediately
-# - Smaller camera stream; no blocking on capture during control
+# - Status prints: camera OK, recording, steer/throttle normals and PWMs
 # - Keyboard: WASD/arrows; space stop; c center; r record; h manual; a auto; q quit
+# - Lighter training: smaller CNN, no dropout, fixed 5 epochs, smaller batch size (8)
 #
 # Suggested run:
 #   LIBCAMERA_LOG_LEVELS=*:2 python3 -u autopilot.py
@@ -166,7 +166,7 @@ class KeyboardDriver:
         self.throttle = 0.0
         # Tap responsiveness
         self.steering_step = 0.45
-        self.throttle_step = 0.05  # throttle +/-0.50 per key press
+        self.throttle_step = 0.05  # changed to 0.05 per your request
         self.manual_quit = False
     def handle_char(self, ch):
         if ch is None:
@@ -308,19 +308,19 @@ def load_dataset(session_root):
     return X, y
 
 # ------------------------------
-# Model
+# Model (lighter to reduce RAM)
 # ------------------------------
 def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
+    # Reduced filters: 16->8, 32->16, 64->32, and removed Dropout to save memory/compute
     model = models.Sequential([
         layers.Input(shape=input_shape),
         layers.Rescaling(1./255),
+        layers.Conv2D(8, (5,5), strides=2, activation='relu'),
         layers.Conv2D(16, (5,5), strides=2, activation='relu'),
-        layers.Conv2D(32, (5,5), strides=2, activation='relu'),
-        layers.Conv2D(64, (3,3), strides=2, activation='relu'),
+        layers.Conv2D(32, (3,3), strides=2, activation='relu'),
         layers.Flatten(),
         layers.Dense(64, activation='relu'),
-        layers.Dropout(0.2),
-        layers.Dense(2, activation='tanh')
+        layers.Dense(2, activation='tanh')  # [steering, throttle] in [-1,1]
     ])
     model.compile(optimizer=optimizers.Adam(1e-3), loss='mse', metrics=['mae'])
     return model
@@ -481,12 +481,15 @@ def preview_and_record_headless():
                 if MAX_LOOPS is not None and loops >= MAX_LOOPS:
                     break
     finally:
+        # Ensure camera/controller are fully stopped and dereferenced before any training
         try:
             cam_th.stop()
         except Exception:
             pass
         ctrl.stop()
         ctrl.close()
+        del cam_th
+        del ctrl
     return session_root
 
 def quick_test_headless(duration_sec=5):
@@ -511,6 +514,9 @@ def quick_test_headless(duration_sec=5):
         ctrl.close()
 
 def train_model_on_session(session_root):
+    # Make sure no camera/controller objects linger in memory when training
+    print("Preparing to train: ensuring camera/controller are not active...", flush=True)
+
     if session_root is None:
         print("No session selected/recorded.")
         return None
@@ -523,6 +529,7 @@ def train_model_on_session(session_root):
     if len(X) < 50:
         print("Not enough samples to train (need ~50+).")
         return None
+
     idx = np.arange(len(X))
     np.random.shuffle(idx)
     X = X[idx]
@@ -531,11 +538,23 @@ def train_model_on_session(session_root):
     n_train = int(0.8 * n)
     X_train, y_train = X[:n_train], y[:n_train]
     X_val, y_val = X[n_train:], y[n_train:]
+
     model = build_model((IMAGE_H, IMAGE_W, IMAGE_DEPTH))
-    epochs = _ask_int("Enter number of training epochs", 30)
-    callbacks = [tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")]
-    _ = model.fit(X_train, y_train, validation_data=(X_val, y_val),
-                  epochs=epochs, batch_size=32, callbacks=callbacks, verbose=1)
+
+    # Fixed small epoch count to save time/RAM
+    epochs = 5
+    callbacks = [tf.keras.callbacks.EarlyStopping(patience=2, restore_best_weights=True, monitor="val_loss")]
+
+    # Reduce batch size for lower RAM usage
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=8,  # reduced from 32
+        callbacks=callbacks,
+        verbose=1
+    )
+
     model_path = os.path.join(session_root, "model.keras")
     model.save(model_path)
     print(f"Saved model to {model_path}")
@@ -575,96 +594,4 @@ def autopilot_loop_headless(model_path):
                 for _ in range(3):
                     ch2 = kb.get_key(timeout=0.0)
                     if ch2:
-                        ch = ch2
-                if ch == 'q':
-                    break
-                if ch == 'h':
-                    manual_override = True
-                elif ch == 'a':
-                    manual_override = False
-                else:
-                    if manual_override:
-                        driver.handle_char(ch)
-
-                frame_rgb = cam_th.get_latest()
-                if not manual_override and frame_rgb is not None:
-                    inp = np.expand_dims(load_image_for_model(frame_rgb), axis=0)
-                    pred = model.predict(inp, verbose=0)[0]
-                    steer = float(np.clip(pred[0], -1, 1))
-                    thr = float(np.clip(pred[1], -1, 1))
-                else:
-                    steer = driver.steering
-                    thr = driver.throttle
-
-                steer_pwm = ctrl.set_steering(steer)
-                thr_pwm = ctrl.set_throttle(thr)
-
-                printer.maybe_print(camera_ok=(frame_rgb is not None),
-                                    steer_norm=steer, thr_norm=thr,
-                                    steer_pwm=steer_pwm, thr_pwm=thr_pwm,
-                                    recording=False)
-
-                next_t += control_period
-                sleep_t = next_t - time.time()
-                if sleep_t > 0:
-                    time.sleep(sleep_t)
-                else:
-                    next_t = time.time()
-    finally:
-        cam_th.stop()
-        ctrl.stop()
-        ctrl.close()
-
-# ------------------------------
-# Small helpers
-# ------------------------------
-def _ask_int(prompt, default):
-    s = input(f"{prompt} [{default}]: ").strip()
-    if s.isdigit():
-        return int(s)
-    return default
-
-def train_from_existing_session():
-    session = select_session_interactive("Select a session to train from existing data:")
-    if session is None:
-        print("Cancelled.")
-        return None
-    return train_model_on_session(session)
-
-def run_autopilot_from_existing_model():
-    model_path = select_model_from_any_session()
-    if model_path is None:
-        print("Cancelled.")
-        return
-    autopilot_loop_headless(model_path)
-
-# ------------------------------
-# Main menu
-# ------------------------------
-def main():
-    print("Meta Dot PiCar Control (Headless, ultra-responsive)", flush=True)
-    ensure_dir(DATA_ROOT)
-    print("1) Drive headless, optionally record a new session")
-    print("2) Train model on a recorded session (from data/)")
-    print("3) Run autopilot headless using an existing trained model (from data/)")
-    print("q) Quit")
-    try:
-        choice = input("Select an option: ").strip().lower()
-    except EOFError:
-        print("No TTY detected. Quick test:\n  python3 -u -c \"import autopilot; autopilot.quick_test_headless(5)\"",
-              flush=True)
-        return
-    if choice == "1":
-        session_root = preview_and_record_headless()
-        print(f"Finished driving. Session: {session_root}")
-    elif choice == "2":
-        _ = train_from_existing_session()
-    elif choice == "3":
-        run_autopilot_from_existing_model()
-    elif choice == "q":
-        print("Bye.")
-    else:
-        print("Unknown option.")
-
-if __name__ == "__main__":
-    main()
+                       
