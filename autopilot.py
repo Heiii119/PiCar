@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-# Meta Dot PiCar Control (Headless, responsive)
-# - Faster keyboard response
-# - Higher control loop rate
-# - Smaller camera stream for quicker capture
-# - No preview window (fully headless)
-# - Keyboard controls via terminal (WASD/arrows; space stop; c center; r record; q quit)
-# - Simple record/train/autopilot pipeline
+# Meta Dot PiCar Control (Headless, ultra-responsive)
+# - Decoupled control (250 Hz) and camera (25 Hz) loops
+# - Keyboard handled aggressively; PWM updates immediately
+# - Smaller camera stream; no blocking on capture during control
+# - Keyboard controls: WASD/arrows; space stop; c center; r record; q quit
 #
-# Tips:
-#   - Run unbuffered for snappier prints:
-#       python3 -u autopilot.py
-#   - Suppress libcamera INFO spam:
-#       LIBCAMERA_LOG_LEVELS=*:2 python3 -u autopilot.py
+# Suggested run:
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u autopilot.py
 
 import os
 import sys
@@ -20,6 +15,7 @@ import csv
 import tty
 import termios
 import select
+import threading
 from datetime import datetime
 from glob import glob
 
@@ -55,20 +51,19 @@ PWM_STEERING_THROTTLE = {
     "THROTTLE_REVERSE_PWM": 220,
 }
 
-# Faster loop for more responsive control
-DRIVE_LOOP_HZ = 100
+# Fast control loop, modest camera loop
+CONTROL_LOOP_HZ = 250
+CAMERA_LOOP_HZ = 25
 MAX_LOOPS = None
 
-# Model input size (what we save and feed to the model)
+# Model input size
 IMAGE_W = 160
 IMAGE_H = 120
 IMAGE_DEPTH = 3
 
 # Camera settings
-CAMERA_FRAMERATE = DRIVE_LOOP_HZ
 CAMERA_VFLIP = False
 CAMERA_HFLIP = False
-# Use a smaller live capture stream for speed; frames are resized to IMAGE_WxIMAGE_H for saving/inference
 CAM_STREAM_W = 320
 CAM_STREAM_H = 240
 
@@ -78,7 +73,6 @@ DATA_ROOT = "data"
 # Utility: PCA9685 helper
 # ------------------------------
 def parse_pca9685_pin(pin_str):
-    # Format "PCA9685.<bus>:0x<addr>.<channel>", e.g. "PCA9685.1:0x40.1"
     try:
         left, chan = pin_str.split(":")
         bus_str = left.split(".")[1]
@@ -97,15 +91,12 @@ class MotorServoController:
         t_bus, t_addr, t_ch = parse_pca9685_pin(config["PWM_THROTTLE_PIN"])
         if s_bus != t_bus or s_addr != t_addr:
             raise ValueError("Steering and Throttle must be on same PCA9685 for this simple driver.")
-
         self.channel_steer = s_ch
         self.channel_throttle = t_ch
-
         self.i2c = busio.I2C(board.SCL, board.SDA)
         print(f"[PCA9685] I2C bus {s_bus}, addr 0x{s_addr:02x}, steer ch {s_ch}, throttle ch {t_ch}", flush=True)
         self.pca = PCA9685(self.i2c, address=s_addr)
-        self.pca.frequency = 60  # 60Hz typical
-
+        self.pca.frequency = 60
         self.cfg = config
         self.stop()
 
@@ -147,23 +138,20 @@ class MotorServoController:
 
     def close(self):
         self.stop()
-        time.sleep(0.2)
+        time.sleep(0.1)
         self.pca.deinit()
 
 # ------------------------------
 # Keyboard (no OpenCV)
 # ------------------------------
 class RawKeyboard:
-    # Non-blocking character reader from stdin (terminal)
     def __enter__(self):
         self.fd = sys.stdin.fileno()
         self.old_settings = termios.tcgetattr(self.fd)
         tty.setcbreak(self.fd)
         return self
-
     def __exit__(self, exc_type, exc, tb):
         termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
-
     def get_key(self, timeout=0.0):
         rlist, _, _ = select.select([sys.stdin], [], [], timeout)
         if rlist:
@@ -175,11 +163,10 @@ class KeyboardDriver:
     def __init__(self):
         self.steering = 0.0
         self.throttle = 0.0
-        # Larger steps per key tap for snappier feel
-        self.steering_step = 0.35
-        self.throttle_step = 0.20
+        # Even larger steps for tap responsiveness; tune as needed
+        self.steering_step = 0.45
+        self.throttle_step = 0.25
         self.manual_quit = False
-
     def handle_char(self, ch):
         if ch is None:
             return
@@ -204,10 +191,10 @@ class KeyboardDriver:
         if ch in ('s',):
             self.throttle = float(np.clip(self.throttle - self.throttle_step, -1, 1))
             return
-        if ch == '\x1b':  # arrow keys
+        if ch == '\x1b':
             seq = ''
             for _ in range(2):
-                nxt = kb.get_key(timeout=0.001)
+                nxt = kb.get_key(timeout=0.0)
                 if nxt:
                     seq += nxt
             if seq == '[D':
@@ -332,101 +319,104 @@ def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
         layers.Flatten(),
         layers.Dense(64, activation='relu'),
         layers.Dropout(0.2),
-        layers.Dense(2, activation='tanh')  # [steering, throttle] in [-1,1]
+        layers.Dense(2, activation='tanh')
     ])
     model.compile(optimizer=optimizers.Adam(1e-3), loss='mse', metrics=['mae'])
     return model
 
 # ------------------------------
-# Picamera2 manager (HEADLESS, no preview)
+# Camera thread
 # ------------------------------
-class PiCam2Manager:
-    def __init__(self, width=IMAGE_W, height=IMAGE_H, framerate=CAMERA_FRAMERATE,
-                 hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP, retries=1, delay=0.5):
+class CameraThread(threading.Thread):
+    def __init__(self, hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP):
+        super().__init__(daemon=True)
         self.capture_resize = (IMAGE_W, IMAGE_H)
-        self.picam2 = None
-
-        last_err = None
-        for _ in range(retries + 1):
-            try:
-                self.picam2 = Picamera2()
-                break
-            except Exception as e:
-                last_err = e
-                time.sleep(delay)
-        if self.picam2 is None:
-            raise RuntimeError(f"Failed to create Picamera2: {last_err}")
-
+        self.picam2 = Picamera2()
         transform = Transform(hflip=hflip, vflip=vflip)
-
-        # Small, fast stream; we will resize to IMAGE_WxIMAGE_H as needed
-        main_w = CAM_STREAM_W
-        main_h = CAM_STREAM_H
-
-        # RGB888 is convenient for numpy
         self.config = self.picam2.create_preview_configuration(
-            main={"size": (main_w, main_h), "format": "RGB888"},
+            main={"size": (CAM_STREAM_W, CAM_STREAM_H), "format": "RGB888"},
             transform=transform
         )
         self.picam2.configure(self.config)
         self.picam2.start()
-        time.sleep(0.2)  # short warmup
-        print(f"[Camera] Headless started: {main_w}x{main_h} RGB888, hflip={hflip}, vflip={vflip}", flush=True)
+        time.sleep(0.15)
+        self.latest_frame = None
+        self.lock = threading.Lock()
+        self.stop_flag = False
+        self.period = 1.0 / CAMERA_LOOP_HZ
+        print(f"[Camera] Thread started: {CAM_STREAM_W}x{CAM_STREAM_H}, target {CAMERA_LOOP_HZ} Hz", flush=True)
 
-    def capture_rgb(self):
-        arr = self.picam2.capture_array()
-        # If format returns 4 channels, drop alpha
-        if arr.ndim == 3 and arr.shape[2] > 3:
-            arr = arr[:, :, :3]
-        # Resize to model/save size if needed
-        if arr.shape[1] != self.capture_resize[0] or arr.shape[0] != self.capture_resize[1]:
-            from PIL import Image
-            arr = np.array(Image.fromarray(arr).resize(self.capture_resize))
-        return arr
+    def run(self):
+        from PIL import Image
+        next_t = time.time()
+        while not self.stop_flag:
+            try:
+                arr = self.picam2.capture_array()
+                if arr.ndim == 3 and arr.shape[2] > 3:
+                    arr = arr[:, :, :3]
+                if arr.shape[1] != self.capture_resize[0] or arr.shape[0] != self.capture_resize[1]:
+                    arr = np.array(Image.fromarray(arr).resize(self.capture_resize))
+                with self.lock:
+                    self.latest_frame = arr
+            except Exception:
+                pass
+            # pacing
+            next_t += self.period
+            sleep_t = next_t - time.time()
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+            else:
+                next_t = time.time()
+
+    def get_latest(self):
+        with self.lock:
+            return None if self.latest_frame is None else self.latest_frame.copy()
 
     def stop(self):
+        self.stop_flag = True
+        time.sleep(0.02)
         try:
             self.picam2.stop()
-        finally:
-            self.picam2 = None
-            time.sleep(0.2)
-            print("[Camera] Stopped", flush=True)
+        except Exception:
+            pass
+        print("[Camera] Thread stopped", flush=True)
 
 # ------------------------------
-# Status printer (reduce console spam)
+# Status printer
 # ------------------------------
 class StatusPrinter:
-    def __init__(self, rate_hz=2):  # lower print rate to reduce I/O overhead
+    def __init__(self, rate_hz=1):
         self.period = 1.0 / max(1, rate_hz)
         self._last = 0.0
-
     def maybe_print(self, camera_ok, steer_norm, thr_norm, steer_pwm, thr_pwm, recording):
         now = time.time()
         if now - self._last >= self.period:
             self._last = now
             rec = "ON" if recording else "OFF"
-            cam = "OK" if camera_ok else "ERR"
+            cam = "OK" if camera_ok else "N/A"
             print(f"[Status] cam={cam} rec={rec} steer={steer_norm:+.2f} thr={thr_norm:+.2f} "
                   f"PWM(s,t)=({steer_pwm},{thr_pwm})", flush=True)
 
 # ------------------------------
-# Main routines (headless)
+# Main routines (decoupled loops)
 # ------------------------------
 def preview_and_record_headless():
-    print("Headless drive. Controls: r=record toggle, q=quit, space=stop, c=center, WASD/arrows to drive.", flush=True)
-    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP)
+    print("Drive headless: r=record, q=quit, space=stop, c=center, WASD/arrows.", flush=True)
+    cam_th = CameraThread(CAMERA_HFLIP, CAMERA_VFLIP)
+    cam_th.start()
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     driver = KeyboardDriver()
-    printer = StatusPrinter(rate_hz=2)
+    printer = StatusPrinter(rate_hz=1)
 
     session_root = None
     csv_path = None
     frame_idx = 0
-    period = 1.0 / DRIVE_LOOP_HZ
-    last_loop = time.time()
 
     ctrl.stop()
-    time.sleep(0.3)
+    time.sleep(0.1)
+
+    control_period = 1.0 / CONTROL_LOOP_HZ
+    next_t = time.time()
 
     try:
         with RawKeyboard() as global_kb:
@@ -434,16 +424,10 @@ def preview_and_record_headless():
             kb = global_kb
             loops = 0
             while True:
-                camera_ok = True
-                try:
-                    frame_rgb = cam.capture_rgb()
-                except Exception:
-                    camera_ok = False
-                    frame_rgb = None
-
-                # Poll keyboard multiple times within the loop for responsiveness
+                # Aggressive keyboard polling; handle immediately
                 ch = kb.get_key(timeout=0.0)
-                for _ in range(2):  # extra polls
+                # Poll a few extra times to pick up bursts
+                for _ in range(3):
                     ch2 = kb.get_key(timeout=0.0)
                     if ch2:
                         ch = ch2
@@ -462,66 +446,67 @@ def preview_and_record_headless():
                 else:
                     driver.handle_char(ch)
 
-                if driver.manual_quit:
+                if driver.manual_quit or ch == 'q':
                     break
 
+                # Update PWM immediately (don’t block on camera)
                 steer_pwm = ctrl.set_steering(driver.steering)
                 thr_pwm = ctrl.set_throttle(driver.throttle)
 
-                if session_root is not None and frame_rgb is not None:
-                    img_name = f"{frame_idx:06d}.jpg"
-                    img_path = os.path.join(session_root, "images", img_name)
-                    from PIL import Image
-                    Image.fromarray(frame_rgb).save(img_path, quality=90)
-                    append_label(csv_path, img_name, driver.steering, driver.throttle)
-                    frame_idx += 1
+                # Optionally save frame if recording (use freshest frame available)
+                if session_root is not None:
+                    frame_rgb = cam_th.get_latest()
+                    if frame_rgb is not None:
+                        img_name = f"{frame_idx:06d}.jpg"
+                        img_path = os.path.join(session_root, "images", img_name)
+                        from PIL import Image
+                        Image.fromarray(frame_rgb).save(img_path, quality=90)
+                        append_label(csv_path, img_name, driver.steering, driver.throttle)
+                        frame_idx += 1
 
-                printer.maybe_print(camera_ok, driver.steering, driver.throttle, steer_pwm, thr_pwm,
+                printer.maybe_print(camera_ok=(cam_th.get_latest() is not None),
+                                    steer_norm=driver.steering, thr_norm=driver.throttle,
+                                    steer_pwm=steer_pwm, thr_pwm=thr_pwm,
                                     recording=(session_root is not None))
 
-                # Maintain loop timing
-                now = time.time()
-                dt = now - last_loop
-                if dt < period:
-                    time.sleep(max(0.0, period - dt))
-                last_loop = time.time()
+                # Pace the control loop
+                next_t += control_period
+                sleep_t = next_t - time.time()
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+                else:
+                    next_t = time.time()
 
                 loops += 1
                 if MAX_LOOPS is not None and loops >= MAX_LOOPS:
                     break
     finally:
         try:
-            cam.stop()
+            cam_th.stop()
         except Exception:
             pass
         ctrl.stop()
         ctrl.close()
     return session_root
 
-# Minimal quick test (no keyboard, no recording) for N seconds
 def quick_test_headless(duration_sec=5):
-    print(f"Quick test: starting camera and neutral PWM for {duration_sec} sec", flush=True)
-    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP)
+    print(f"Quick test: camera thread + neutral PWM for {duration_sec} sec", flush=True)
+    cam_th = CameraThread(CAMERA_HFLIP, CAMERA_VFLIP)
+    cam_th.start()
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     start = time.time()
     ok = 0
     try:
         while time.time() - start < duration_sec:
-            try:
-                _ = cam.capture_rgb()
+            fr = cam_th.get_latest()
+            if fr is not None:
                 ok += 1
-            except Exception as e:
-                print("Camera error:", e, flush=True)
-                break
             ctrl.set_steering(0.0)
             ctrl.set_throttle(0.0)
             time.sleep(0.01)
-        print(f"Captured {ok} frames headlessly.", flush=True)
+        print(f"Camera provided {ok} frames.", flush=True)
     finally:
-        try:
-            cam.stop()
-        except Exception:
-            pass
+        cam_th.stop()
         ctrl.stop()
         ctrl.close()
 
@@ -535,11 +520,9 @@ def train_model_on_session(session_root):
     except Exception as e:
         print(f"Failed to load dataset: {e}")
         return None
-
     if len(X) < 50:
         print("Not enough samples to train (need ~50+).")
         return None
-
     idx = np.arange(len(X))
     np.random.shuffle(idx)
     X = X[idx]
@@ -548,20 +531,11 @@ def train_model_on_session(session_root):
     n_train = int(0.8 * n)
     X_train, y_train = X[:n_train], y[:n_train]
     X_val, y_val = X[n_train:], y[n_train:]
-
     model = build_model((IMAGE_H, IMAGE_W, IMAGE_DEPTH))
     epochs = _ask_int("Enter number of training epochs", 30)
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")]
-
-    _ = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
-        epochs=epochs,
-        batch_size=32,
-        callbacks=callbacks,
-        verbose=1
-    )
-
+    _ = model.fit(X_train, y_train, validation_data=(X_val, y_val),
+                  epochs=epochs, batch_size=32, callbacks=callbacks, verbose=1)
     model_path = os.path.join(session_root, "model.keras")
     model.save(model_path)
     print(f"Saved model to {model_path}")
@@ -570,53 +544,38 @@ def train_model_on_session(session_root):
 def _robust_load_model(path):
     try:
         if path.endswith(".h5") or path.endswith(".hdf5"):
-            print("Loading legacy HDF5 model with compile=False to avoid metric deserialization issues...")
+            print("Loading legacy HDF5 model with compile=False...")
             return tf.keras.models.load_model(path, compile=False)
         return tf.keras.models.load_model(path)
-    except Exception as e:
-        print(f"Primary load failed: {e}")
-        print("Retrying with compile=False ...")
+    except Exception:
         return tf.keras.models.load_model(path, compile=False)
 
 def autopilot_loop_headless(model_path):
     if model_path is None or not os.path.exists(model_path):
         print("Model not found; cannot run autopilot.")
         return
-
     model = _robust_load_model(model_path)
-
-    cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP)
+    cam_th = CameraThread(CAMERA_HFLIP, CAMERA_VFLIP)
+    cam_th.start()
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
-    period = 1.0 / DRIVE_LOOP_HZ
-    last_loop = time.time()
-    printer = StatusPrinter(rate_hz=2)
-
+    printer = StatusPrinter(rate_hz=1)
     manual_override = False
     driver = KeyboardDriver()
-
     ctrl.stop()
-    time.sleep(0.3)
-
+    time.sleep(0.1)
+    control_period = 1.0 / CONTROL_LOOP_HZ
+    next_t = time.time()
     try:
         with RawKeyboard() as global_kb:
             global kb
             kb = global_kb
-            print("Autopilot headless. h=manual, a=auto, q=quit. Space stop, c center; WASD in manual.", flush=True)
+            print("Autopilot: h=manual, a=auto, q=quit. Space stop, c center; WASD in manual.", flush=True)
             while True:
-                camera_ok = True
-                try:
-                    frame_rgb = cam.capture_rgb()
-                except Exception:
-                    camera_ok = False
-                    frame_rgb = None
-
-                # Poll keys multiple times for responsiveness
                 ch = kb.get_key(timeout=0.0)
-                for _ in range(2):
+                for _ in range(3):
                     ch2 = kb.get_key(timeout=0.0)
                     if ch2:
                         ch = ch2
-
                 if ch == 'q':
                     break
                 if ch == 'h':
@@ -626,7 +585,7 @@ def autopilot_loop_headless(model_path):
                 else:
                     if manual_override:
                         driver.handle_char(ch)
-
+                frame_rgb = cam_th.get_latest()
                 if not manual_override and frame_rgb is not None:
                     inp = np.expand_dims(load_image_for_model(frame_rgb), axis=0)
                     pred = model.predict(inp, verbose=0)[0]
@@ -635,22 +594,20 @@ def autopilot_loop_headless(model_path):
                 else:
                     steer = driver.steering
                     thr = driver.throttle
-
                 steer_pwm = ctrl.set_steering(steer)
                 thr_pwm = ctrl.set_throttle(thr)
-
-                printer.maybe_print(camera_ok, steer, thr, steer_pwm, thr_pwm, recording=False)
-
-                now = time.time()
-                dt = now - last_loop
-                if dt < period:
-                    time.sleep(max(0.0, period - dt))
-                last_loop = time.time()
+                printer.maybe_print(camera_ok=(frame_rgb is not None),
+                                    steer_norm=steer, thr_norm=thr,
+                                    steer_pwm=steer_pwm, thr_pwm=thr_pwm,
+                                    recording=False)
+                next_t += control_period
+                sleep_t = next_t - time.time()
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+                else:
+                    next_t = time.time()
     finally:
-        try:
-            cam.stop()
-        except Exception:
-            pass
+        cam_th.stop()
         ctrl.stop()
         ctrl.close()
 
@@ -678,25 +635,21 @@ def run_autopilot_from_existing_model():
     autopilot_loop_headless(model_path)
 
 # ------------------------------
-# Main menu flow (headless options)
+# Main menu
 # ------------------------------
 def main():
-    print("Starting autopilot.py (headless menu)...", flush=True)
+    print("Meta Dot PiCar Control (Headless, ultra-responsive)", flush=True)
     ensure_dir(DATA_ROOT)
-    print("Meta Dot PiCar Control (Headless, responsive)")
-    print("1) Drive headless, and optionally record a new session")
-    print("2) Train model on a previously recorded session (from data/)")
+    print("1) Drive headless, optionally record a new session")
+    print("2) Train model on a recorded session (from data/)")
     print("3) Run autopilot headless using an existing trained model (from data/)")
     print("q) Quit")
-
     try:
         choice = input("Select an option: ").strip().lower()
     except EOFError:
-        print("No TTY detected or input closed. Tip: run quick test via:\n"
-              "  python3 -u -c \"import autopilot; autopilot.quick_test_headless(5)\"",
+        print("No TTY detected. Quick test:\n  python3 -u -c \"import autopilot; autopilot.quick_test_headless(5)\"",
               flush=True)
         return
-
     if choice == "1":
         session_root = preview_and_record_headless()
         print(f"Finished driving. Session: {session_root}")
