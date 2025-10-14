@@ -21,7 +21,8 @@ from adafruit_pca9685 import PCA9685
 
 # TensorFlow 2.4+
 import tensorflow as tf
-from tensorflow.keras import layers, models, optimizers
+from tensorflow.keras import layers, models, optimizers, callbacks
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 # ------------------------------
 # Configuration
@@ -29,25 +30,24 @@ from tensorflow.keras import layers, models, optimizers
 PWM_STEERING_THROTTLE = {
     "PWM_STEERING_PIN": "PCA9685.1:0x40.1",  # ensure 0x40
     "PWM_STEERING_SCALE": 1.0,
-    "PWM_STEERING_INVERTED": False,
+    "PWM_STEERING_INVERTED": True,
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # ensure 0x40
     "PWM_THROTTLE_SCALE": 1.0,
     "PWM_THROTTLE_INVERTED": False,
-    "STEERING_LEFT_PWM": 290,
-    "STEERING_RIGHT_PWM": 460,
+    "STEERING_LEFT_PWM": 280,
+    "STEERING_RIGHT_PWM": 500,
     "THROTTLE_FORWARD_PWM": 500,
     "THROTTLE_STOPPED_PWM": 370,
     "THROTTLE_REVERSE_PWM": 220,
 }
 
-# Increase loop rate for better responsiveness
-DRIVE_LOOP_HZ = 120
+DRIVE_LOOP_HZ = 50
 MAX_LOOPS = None
 
 IMAGE_W = 160
 IMAGE_H = 120
 IMAGE_DEPTH = 3
-CAMERA_FRAMERATE = 30  # keep camera moderate; control loop is faster
+CAMERA_FRAMERATE = DRIVE_LOOP_HZ
 CAMERA_VFLIP = False
 CAMERA_HFLIP = False
 
@@ -57,7 +57,7 @@ DATA_ROOT = "data"
 # Utility: PCA9685 helper
 # ------------------------------
 def parse_pca9685_pin(pin_str):
-    # Format "PCA9685.<bus>:0x<addr>.<channel>", e.g. "PCA9685.1:0x40.1"
+    # Format "PCA9685.<bus>:<addr>.<channel>", e.g. "PCA9685.1:0x40.1"
     try:
         left, chan = pin_str.split(":")
         bus_str = left.split(".")[1]
@@ -100,7 +100,6 @@ class MotorServoController:
             steer_norm = -steer_norm
         pwm = int(np.interp(steer_norm, [-1, 1], [right, left]))
         self.set_pwm_raw(self.channel_steer, pwm)
-        return pwm
 
     def set_throttle(self, throttle_norm):
         if self.cfg["PWM_THROTTLE_INVERTED"]:
@@ -110,7 +109,6 @@ class MotorServoController:
         fwd = self.cfg["THROTTLE_FORWARD_PWM"]
         pwm = int(np.interp(throttle_norm, [-1, 0, 1], [rev, stop, fwd]))
         self.set_pwm_raw(self.channel_throttle, pwm)
-        return pwm
 
     def stop(self):
         self.set_throttle(0.0)
@@ -145,9 +143,8 @@ class KeyboardDriver:
     def __init__(self):
         self.steering = 0.0
         self.throttle = 0.0
-        # Snappier steps; throttle now 0.5 per key press as requested
-        self.steering_step = 0.35
-        self.throttle_step = 0.50
+        self.steering_step = 0.25
+        self.throttle_step = 0.1
         self.manual_quit = False
 
     def handle_char(self, ch):
@@ -177,7 +174,7 @@ class KeyboardDriver:
         if ch == '\x1b':
             seq = ''
             for _ in range(2):
-                nxt = kb.get_key(timeout=0.0)
+                nxt = kb.get_key(timeout=0.001)
                 if nxt:
                     seq += nxt
             if seq == '[D':
@@ -290,21 +287,87 @@ def load_dataset(session_root):
     return X, y
 
 # ------------------------------
-# Model
+# Model - Improved architecture inspired by NVIDIA PilotNet
 # ------------------------------
 def build_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
+    """
+    Improved CNN architecture with:
+    - Deeper network for better feature extraction
+    - Batch normalization for training stability
+    - More dropout for regularization
+    - Larger fully connected layers
+    """
     model = models.Sequential([
         layers.Input(shape=input_shape),
         layers.Rescaling(1./255),
-        layers.Conv2D(16, (5,5), strides=2, activation='relu'),
-        layers.Conv2D(32, (5,5), strides=2, activation='relu'),
-        layers.Conv2D(64, (3,3), strides=2, activation='relu'),
+        
+        # Convolutional layers with batch normalization
+        layers.Conv2D(24, (5,5), strides=2, activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        
+        layers.Conv2D(36, (5,5), strides=2, activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        
+        layers.Conv2D(48, (5,5), strides=2, activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        
+        layers.Conv2D(64, (3,3), activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        
+        layers.Conv2D(64, (3,3), activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        
         layers.Flatten(),
+        
+        # Fully connected layers with dropout
+        layers.Dense(128, activation='relu'),
+        layers.Dropout(0.3),
+        
         layers.Dense(64, activation='relu'),
+        layers.Dropout(0.3),
+        
+        layers.Dense(32, activation='relu'),
         layers.Dropout(0.2),
+        
         layers.Dense(2, activation='tanh')  # [steering, throttle] in [-1,1]
     ])
-    model.compile(optimizer=optimizers.Adam(1e-3), loss='mse', metrics=['mae'])
+    
+    # Use lower learning rate with Adam optimizer
+    model.compile(
+        optimizer=optimizers.Adam(learning_rate=5e-4),
+        loss='mse',
+        metrics=['mae', 'mse']
+    )
+    return model
+
+def build_lightweight_model(input_shape=(IMAGE_H, IMAGE_W, IMAGE_DEPTH)):
+    """
+    Lighter model for faster training/inference (if needed)
+    """
+    model = models.Sequential([
+        layers.Input(shape=input_shape),
+        layers.Rescaling(1./255),
+        
+        layers.Conv2D(16, (5,5), strides=2, activation='relu'),
+        layers.BatchNormalization(),
+        layers.Conv2D(32, (5,5), strides=2, activation='relu'),
+        layers.BatchNormalization(),
+        layers.Conv2D(64, (3,3), strides=2, activation='relu'),
+        layers.BatchNormalization(),
+        
+        layers.Flatten(),
+        layers.Dense(100, activation='relu'),
+        layers.Dropout(0.3),
+        layers.Dense(50, activation='relu'),
+        layers.Dropout(0.2),
+        layers.Dense(2, activation='tanh')
+    ])
+    
+    model.compile(
+        optimizer=optimizers.Adam(learning_rate=1e-3),
+        loss='mse',
+        metrics=['mae', 'mse']
+    )
     return model
 
 # ------------------------------
@@ -397,25 +460,20 @@ def preview_and_record():
     csv_path = None
     frame_idx = 0
     period = 1.0 / DRIVE_LOOP_HZ
-    next_t = time.time()
+    last_loop = time.time()
 
     ctrl.stop()
-    time.sleep(0.3)
+    time.sleep(2.0)
 
     try:
         with RawKeyboard() as global_kb:
             global kb
             kb = global_kb
             print("Drive with WASD/Arrows; space=stop; c=center; r=record toggle; q=quit.")
-            loops = 0
             while True:
-                # Poll keyboard aggressively and handle immediately
-                ch = kb.get_key(timeout=0.0)
-                for _ in range(2):
-                    ch2 = kb.get_key(timeout=0.0)
-                    if ch2:
-                        ch = ch2
+                frame_rgb = cam.capture_rgb()
 
+                ch = kb.get_key(timeout=0.0)
                 if ch == 'r':
                     if session_root is None:
                         session_root = create_session_dir()
@@ -433,14 +491,9 @@ def preview_and_record():
                 if driver.manual_quit:
                     break
 
-                # Apply control immediately (do not block on camera)
-                steer_pwm = ctrl.set_steering(driver.steering)
-                thr_pwm = ctrl.set_throttle(driver.throttle)
+                ctrl.set_steering(driver.steering)
+                ctrl.set_throttle(driver.throttle)
 
-                # Capture only after control is applied
-                frame_rgb = cam.capture_rgb()
-
-                # Save frame if recording
                 if session_root is not None:
                     img_name = f"{frame_idx:06d}.jpg"
                     img_path = os.path.join(session_root, "images", img_name)
@@ -449,17 +502,11 @@ def preview_and_record():
                     append_label(csv_path, img_name, driver.steering, driver.throttle)
                     frame_idx += 1
 
-                # Maintain precise loop timing
-                next_t += period
-                sleep_t = next_t - time.time()
-                if sleep_t > 0:
-                    time.sleep(sleep_t)
-                else:
-                    next_t = time.time()
-
-                loops += 1
-                if MAX_LOOPS is not None and loops >= MAX_LOOPS:
-                    break
+                now = time.time()
+                dt = now - last_loop
+                if dt < period:
+                    time.sleep(period - dt)
+                last_loop = time.time()
     finally:
         try:
             cam.stop()
@@ -468,13 +515,71 @@ def preview_and_record():
         ctrl.stop()
         ctrl.close()
     return session_root
-
 # place this near other small helpers or inside train_model_on_session before model.fit
 def _ask_int(prompt, default):
     s = input(f"{prompt} [{default}]: ").strip()
     if s.isdigit():
         return int(s)
     return default
+
+def _ask_yes_no(prompt, default=False):
+    s = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+    if s == '':
+        return default
+    return s == 'y'
+
+def augment_data(X, y, augmentation_factor=2):
+    """
+    Data augmentation: flip images horizontally and adjust steering
+    """
+    X_aug = []
+    y_aug = []
+    
+    for i in range(len(X)):
+        X_aug.append(X[i])
+        y_aug.append(y[i])
+        
+        # Flip horizontally and invert steering
+        for _ in range(augmentation_factor - 1):
+            flipped = np.fliplr(X[i])
+            X_aug.append(flipped)
+            # Invert steering for flipped image
+            y_flipped = y[i].copy()
+            y_flipped[0] = -y_flipped[0]  # Negate steering
+            y_aug.append(y_flipped)
+    
+    return np.array(X_aug), np.array(y_aug)
+
+def create_data_generator(X, y, batch_size=32, augment=True):
+    """
+    Create data generator with real-time augmentation
+    """
+    if not augment:
+        while True:
+            indices = np.random.permutation(len(X))
+            for i in range(0, len(X), batch_size):
+                batch_idx = indices[i:i+batch_size]
+                yield X[batch_idx], y[batch_idx]
+    else:
+        while True:
+            indices = np.random.permutation(len(X))
+            for i in range(0, len(X), batch_size):
+                batch_idx = indices[i:i+batch_size]
+                X_batch = X[batch_idx].copy()
+                y_batch = y[batch_idx].copy()
+                
+                # Random brightness adjustment
+                for j in range(len(X_batch)):
+                    if np.random.rand() > 0.5:
+                        brightness = np.random.uniform(0.7, 1.3)
+                        X_batch[j] = np.clip(X_batch[j] * brightness, 0, 255).astype(np.uint8)
+                    
+                    # Random horizontal flip
+                    if np.random.rand() > 0.5:
+                        X_batch[j] = np.fliplr(X_batch[j])
+                        y_batch[j][0] = -y_batch[j][0]  # Flip steering
+                
+                yield X_batch, y_batch
 
 def train_model_on_session(session_root):
     if session_root is None:
@@ -490,32 +595,167 @@ def train_model_on_session(session_root):
     if len(X) < 50:
         print("Not enough samples to train (need ~50+).")
         return None
-
+    
+    print(f"\n=== Training Configuration ===")
+    print(f"Total samples: {len(X)}")
+    
+    # Ask for configuration
+    use_augmentation = _ask_yes_no("Use data augmentation (recommended)?", default=True)
+    use_lightweight = _ask_yes_no("Use lightweight model (faster but less accurate)?", default=False)
+    epochs = _ask_int("Enter number of training epochs", 50)
+    batch_size = _ask_int("Enter batch size", 32)
+    
+    # Augment data if requested
+    if use_augmentation:
+        print("Augmenting data (horizontal flips)...")
+        X, y = augment_data(X, y, augmentation_factor=2)
+        print(f"Augmented samples: {len(X)}")
+    
+    # Shuffle and split
     idx = np.arange(len(X))
     np.random.shuffle(idx)
     X = X[idx]
     y = y[idx]
     n = len(X)
-    n_train = int(0.8 * n)
+    n_train = int(0.85 * n)  # Use 85% for training
     X_train, y_train = X[:n_train], y[:n_train]
     X_val, y_val = X[n_train:], y[n_train:]
+    
+    print(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
 
-    model = build_model((IMAGE_H, IMAGE_W, IMAGE_DEPTH))
-    epochs = _ask_int("Enter number of training epochs", 30)
-    callbacks = [tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")]
+    # Build model
+    if use_lightweight:
+        print("Building lightweight model...")
+        model = build_lightweight_model((IMAGE_H, IMAGE_W, IMAGE_DEPTH))
+    else:
+        print("Building improved PilotNet-style model...")
+        model = build_model((IMAGE_H, IMAGE_W, IMAGE_DEPTH))
+    
+    print(f"\nModel Summary:")
+    model.summary()
+    
+    # Setup callbacks
+    log_dir = os.path.join(session_root, "logs")
+    ensure_dir(log_dir)
+    
+    training_callbacks = [
+        # Early stopping with more patience
+        tf.keras.callbacks.EarlyStopping(
+            patience=10,
+            restore_best_weights=True,
+            monitor="val_loss",
+            verbose=1
+        ),
+        
+        # Reduce learning rate on plateau
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-6,
+            verbose=1
+        ),
+        
+        # Model checkpoint to save best model
+        tf.keras.callbacks.ModelCheckpoint(
+            os.path.join(session_root, "best_model.keras"),
+            monitor='val_loss',
+            save_best_only=True,
+            verbose=1
+        ),
+        
+        # TensorBoard logging
+        tf.keras.callbacks.TensorBoard(
+            log_dir=log_dir,
+            histogram_freq=1,
+            write_graph=True
+        ),
+        
+        # CSV logger
+        tf.keras.callbacks.CSVLogger(
+            os.path.join(session_root, "training_log.csv"),
+            append=False
+        )
+    ]
 
+    print("\n=== Starting Training ===")
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
-        batch_size=32,
-        callbacks=callbacks,
+        batch_size=batch_size,
+        callbacks=training_callbacks,
         verbose=1
     )
 
+    # Save final model
     model_path = os.path.join(session_root, "model.keras")
     model.save(model_path)
-    print(f"Saved model to {model_path}")
+    print(f"\n=== Training Complete ===")
+    print(f"Final model saved to: {model_path}")
+    print(f"Best model saved to: {os.path.join(session_root, 'best_model.keras')}")
+    print(f"Training log saved to: {os.path.join(session_root, 'training_log.csv')}")
+    
+    # Print final metrics
+    final_loss = history.history['loss'][-1]
+    final_val_loss = history.history['val_loss'][-1]
+    final_mae = history.history['mae'][-1]
+    final_val_mae = history.history['val_mae'][-1]
+    
+    print(f"\nFinal Training Loss: {final_loss:.4f}, MAE: {final_mae:.4f}")
+    print(f"Final Validation Loss: {final_val_loss:.4f}, MAE: {final_val_mae:.4f}")
+    
+    # Plot training history
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # Loss plot
+        axes[0, 0].plot(history.history['loss'], label='Training Loss')
+        axes[0, 0].plot(history.history['val_loss'], label='Validation Loss')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss (MSE)')
+        axes[0, 0].set_title('Model Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
+        
+        # MAE plot
+        axes[0, 1].plot(history.history['mae'], label='Training MAE')
+        axes[0, 1].plot(history.history['val_mae'], label='Validation MAE')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('MAE')
+        axes[0, 1].set_title('Mean Absolute Error')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        
+        # Learning rate (if available)
+        if 'lr' in history.history:
+            axes[1, 0].plot(history.history['lr'])
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('Learning Rate')
+            axes[1, 0].set_title('Learning Rate Schedule')
+            axes[1, 0].set_yscale('log')
+            axes[1, 0].grid(True)
+        
+        # Overfitting check
+        axes[1, 1].plot(np.array(history.history['loss']) - np.array(history.history['val_loss']))
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('Train Loss - Val Loss')
+        axes[1, 1].set_title('Overfitting Check (lower is better)')
+        axes[1, 1].axhline(y=0, color='r', linestyle='--', alpha=0.3)
+        axes[1, 1].grid(True)
+        
+        plt.tight_layout()
+        plot_path = os.path.join(session_root, "training_plot.png")
+        plt.savefig(plot_path, dpi=150)
+        print(f"Training plot saved to: {plot_path}")
+        plt.close()
+    except Exception as e:
+        print(f"Could not create training plot: {e}")
+    
     return model_path
 
 def _robust_load_model(path):
@@ -534,64 +774,103 @@ def autopilot_loop(model_path):
         print("Model not found; cannot run autopilot.")
         return
 
-    model = _robust_load_model(model_path)
+    # Check if there's a best_model.keras in the same directory
+    best_model_path = os.path.join(os.path.dirname(model_path), "best_model.keras")
+    if os.path.exists(best_model_path):
+        use_best = _ask_yes_no(f"Found best_model.keras, use it instead of {os.path.basename(model_path)}?", default=True)
+        if use_best:
+            model_path = best_model_path
+            print(f"Using best model: {model_path}")
 
+    model = _robust_load_model(model_path)
+    
+    # Ask for throttle scaling
+    print("\nAutopilot Configuration:")
+    throttle_scale = float(input("Enter throttle scaling factor [0.5-1.0, default 0.7]: ").strip() or "0.7")
+    throttle_scale = np.clip(throttle_scale, 0.1, 1.0)
+    
+    steering_smoothing = _ask_yes_no("Enable steering smoothing (recommended)?", default=True)
+    
     cam = PiCam2Manager(IMAGE_W, IMAGE_H, CAMERA_FRAMERATE, CAMERA_HFLIP, CAMERA_VFLIP, with_preview=True)
     ctrl = MotorServoController(PWM_STEERING_THROTTLE)
     period = 1.0 / DRIVE_LOOP_HZ
-    next_t = time.time()
+    last_loop = time.time()
 
     manual_override = False
     driver = KeyboardDriver()
+    
+    # Steering smoothing
+    prev_steer = 0.0
+    steering_alpha = 0.3  # Exponential moving average factor
 
     ctrl.stop()
-    time.sleep(0.3)
+    time.sleep(2.0)
 
     try:
         with RawKeyboard() as global_kb:
             global kb
             kb = global_kb
-            print("Autopilot running. h=manual, a=auto, q=quit. Space stop, c center; WASD in manual.")
+            print("\n=== Autopilot Controls ===")
+            print("h = Switch to manual mode")
+            print("p = Switch to autopilot mode")
+            print("q = Quit")
+            print("Space = Emergency stop")
+            print("c = Center steering")
+            print("WASD/Arrows = Manual control (when in manual mode)")
+            print(f"\nThrottle scale: {throttle_scale:.2f}")
+            print(f"Steering smoothing: {'Enabled' if steering_smoothing else 'Disabled'}")
+            print("\nStarting in AUTOPILOT mode...")
+            
+            frame_count = 0
             while True:
-                # Poll keys multiple times per loop
-                ch = kb.get_key(timeout=0.0)
-                for _ in range(2):
-                    ch2 = kb.get_key(timeout=0.0)
-                    if ch2:
-                        ch = ch2
+                frame_rgb = cam.capture_rgb()
+                frame_count += 1
 
+                ch = kb.get_key(timeout=0.0)
                 if ch == 'q':
                     break
                 if ch == 'h':
                     manual_override = True
-                elif ch == 'a':
+                    print("\n>>> Switched to MANUAL mode")
+                elif ch == 'p':
                     manual_override = False
+                    print("\n>>> Switched to AUTOPILOT mode")
+                elif ch == ' ':
+                    # Emergency stop
+                    ctrl.stop()
+                    print("\n!!! EMERGENCY STOP !!!")
+                    continue
                 else:
                     if manual_override:
                         driver.handle_char(ch)
 
-                # Apply manual control immediately if in manual
-                if manual_override:
-                    steer = driver.steering
-                    thr = driver.throttle
-                else:
-                    # Capture and infer when in auto
-                    frame_rgb = cam.capture_rgb()
+                if not manual_override:
                     inp = np.expand_dims(load_image_for_model(frame_rgb), axis=0)
                     pred = model.predict(inp, verbose=0)[0]
                     steer = float(np.clip(pred[0], -1, 1))
-                    thr = float(np.clip(pred[1], -1, 1))
+                    thr = float(np.clip(pred[1], -1, 1)) * throttle_scale
+                    
+                    # Apply steering smoothing
+                    if steering_smoothing:
+                        steer = steering_alpha * steer + (1 - steering_alpha) * prev_steer
+                        prev_steer = steer
+                    
+                    # Print periodic status
+                    if frame_count % 50 == 0:
+                        print(f"[Auto] Steer: {steer:+.3f}, Throttle: {thr:+.3f}")
+                else:
+                    steer = driver.steering
+                    thr = driver.throttle
+                    prev_steer = steer  # Update for smooth transition back to auto
 
                 ctrl.set_steering(steer)
                 ctrl.set_throttle(thr)
 
-                # Maintain precise loop timing
-                next_t += period
-                sleep_t = next_t - time.time()
-                if sleep_t > 0:
-                    time.sleep(sleep_t)
-                else:
-                    next_t = time.time()
+                now = time.time()
+                dt = now - last_loop
+                if dt < period:
+                    time.sleep(period - dt)
+                last_loop = time.time()
     finally:
         try:
             cam.stop()
@@ -599,6 +878,7 @@ def autopilot_loop(model_path):
             pass
         ctrl.stop()
         ctrl.close()
+        print("\nAutopilot stopped safely.")
 
 # ------------------------------
 # New helpers: train from previous data, run autopilot from existing model

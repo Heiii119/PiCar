@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-# tt02_keyboard_drive_with_camera_60hz_loop.py
+# tt02_keyboard_drive_with_camera_60hz.py
 # Keyboard drive for TT02 RC car using PCA9685 @ 60 Hz with a curses status UI
 # and Picamera2 live preview window.
 #
-# This version honors a configurable DRIVE_LOOP_HZ pacing (and optional MAX_LOOPS),
-# while keeping PCA9685 at 60 Hz and using fixed 12-bit PWM endpoints as requested.
-#
-# Fixed PWM endpoints (12-bit ticks):
-#   THROTTLE_REVERSE_PWM = 270
-#   THROTTLE_FORWARD_PWM = 400
-#   STEERING_RIGHT_PWM   = 240
-#   STEERING_LEFT_PWM    = 370
-#
-# Loop pacing:
-#   - DRIVE_LOOP_HZ controls how fast the main loop runs (sleeping if faster).
-#   - MAX_LOOPS (None or int) limits total iterations for testing.
+# Changes in this 60 Hz version:
+# - PCA9685_FREQUENCY set to 60 Hz.
+# - Fixed 12-bit PWM targets:
+#     THROTTLE_REVERSE_PWM = 270
+#     THROTTLE_FORWARD_PWM = 400
+#     STEERING_RIGHT_PWM   = 240
+#     STEERING_LEFT_PWM    = 370
+# - Everything else preserved (STOP at center, safe STOP-pass pause, curses HUD, Picamera2 preview).
 
 import time
 import curses
@@ -22,12 +18,6 @@ import signal
 import sys
 
 from picamera2 import Picamera2, Preview
-
-# ==========================
-# Vehicle loop pacing config
-# ==========================
-DRIVE_LOOP_HZ = 20      # the vehicle loop will pause if faster than this speed.
-MAX_LOOPS = None        # the vehicle loop can abort after this many iterations, when given a positive integer.
 
 # ==========================
 # User-configurable constants
@@ -44,14 +34,14 @@ FRAME_HEIGHT = 480
 
 # Helper: convert microseconds to 12-bit ticks for the given freq (kept for reference/utility)
 def us_to_12bit(us, freq=PCA9685_FREQUENCY):
-    period_us = 1_000_000.0 / freq  # ~16_666.67 at 60 Hz
+    period_us = 1_000_000.0 / freq  # e.g., ~16_666.67 at 60 Hz
     ticks = round((us / period_us) * 4095.0)
     return max(0, min(4095, int(ticks)))
 
 # THROTTLE endpoints (12-bit ticks at 60 Hz per user request)
 THROTTLE_CHANNEL       = 0
 THROTTLE_REVERSE_PWM   = 270
-THROTTLE_STOPPED_PWM   = us_to_12bit(1500)  # neutral around 1.5 ms
+THROTTLE_STOPPED_PWM   = us_to_12bit(1500)  # center/neutral around 1.5 ms
 THROTTLE_FORWARD_PWM   = 400
 
 # STEERING endpoints (12-bit ticks at 60 Hz per user request)
@@ -62,8 +52,8 @@ STEERING_LEFT_PWM    = 410
 # How long to treat key as "held" after last repeat (seconds)
 KEY_HOLD_TIMEOUT = 0.20
 
-# UI refresh cadence (independent of DRIVE_LOOP_HZ; UI throttled by min_refresh_interval)
-UI_MIN_REFRESH_S = 0.02  # 50 Hz max refresh
+# UI refresh rate (Hz)
+UI_FPS = 50.0
 
 # Safety pause when switching FWD <-> REV
 SWITCH_PAUSE_S = 0.06
@@ -207,15 +197,11 @@ def run(stdscr):
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    # Loop pacing setup
-    target_dt = 1.0 / float(DRIVE_LOOP_HZ)
-    loop_count = 0
-
+    # Main loop
+    dt = 1.0 / UI_FPS
     try:
         while True:
-            frame_start = time.time()
-
-            t = frame_start
+            t = time.time()
             # Drain input buffer this frame
             while True:
                 ch = stdscr.getch()
@@ -304,25 +290,16 @@ def run(stdscr):
                 last_steer = steer_pwm
 
             # Status display (non-scrolling, in-place)
-            if (t - last_help_refresh) > UI_MIN_REFRESH_S:
+            if (t - last_help_refresh) > 0.02:
                 last_help_refresh = t
                 stdscr.addstr(7, 0, f"Throttle: {last_throttle:4d}  (FWD:{THROTTLE_FORWARD_PWM} STOP:{THROTTLE_STOPPED_PWM} REV:{THROTTLE_REVERSE_PWM})     ")
                 stdscr.addstr(8, 0, f"Steering: {last_steer:4d}   (L:{STEERING_LEFT_PWM} C:{steering_center_pwm()} R:{STEERING_RIGHT_PWM})     ")
                 wait_flag = " (dir-wait)" if t < dir_block_until and last_dir == "STOP" else "           "
                 stdscr.addstr(9, 0, f"Dir: {last_dir}{wait_flag}                                         ")
-                stdscr.addstr(11, 0, f"Loop target: {DRIVE_LOOP_HZ} Hz. Hold arrows/WASD to drive. 'q' to quit.       ")
+                stdscr.addstr(11, 0, "Hold arrows/WASD to drive. Release to stop/center. 'q' to quit.            ")
                 stdscr.refresh()
 
-            # Loop count and optional cap
-            loop_count += 1
-            if MAX_LOOPS is not None and loop_count >= MAX_LOOPS:
-                break
-
-            # Pace the loop to DRIVE_LOOP_HZ
-            elapsed = time.time() - frame_start
-            sleep_time = (1.0 / DRIVE_LOOP_HZ) - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            time.sleep(dt)
 
     finally:
         # Ensure safe neutral and restore terminal even on exceptions
