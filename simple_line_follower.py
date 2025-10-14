@@ -31,11 +31,11 @@ CFG = {
     "PWM_STEERING_INVERTED": False,
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",
     "PWM_THROTTLE_INVERTED": False,
-    "STEERING_LEFT_PWM": 270,     # updated
-    "STEERING_RIGHT_PWM": 470,    # updated
-    "THROTTLE_FORWARD_PWM": 420,  # updated
-    "THROTTLE_STOPPED_PWM": 370,  # updated
-    "THROTTLE_REVERSE_PWM": 290,  # updated
+    "STEERING_LEFT_PWM": 270,
+    "STEERING_RIGHT_PWM": 470,
+    "THROTTLE_FORWARD_PWM": 420,
+    "THROTTLE_STOPPED_PWM": 370,
+    "THROTTLE_REVERSE_PWM": 290,
 }
 
 # Camera
@@ -47,29 +47,31 @@ PROC_W, PROC_H = 160, 120
 
 # Line detection (yellow on black -> bright line)
 LINE_IS_DARK = False
-ROI_FRACTION = (0.60, 0.92)   # focus near bottom; tweak per camera tilt
-THRESH = 0.60                 # try 0.55–0.70
-MIN_PIXELS = 40               # a bit higher because of bright-on-dark
+ROI_FRACTION = (0.60, 0.92)
+THRESH = 0.60
+MIN_PIXELS = 40
 
 # Loops
 CONTROL_LOOP_HZ = 250
 CAMERA_LOOP_HZ  = 25
 
-# Control: sharper steering (increase P, keep D; reduce smoothing)
-STEER_P_GAIN = 1.30           # was ~0.9; higher = sharper turns
+# Control: sharper steering
+STEER_P_GAIN = 1.30
 STEER_I_GAIN = 0.00
-STEER_D_GAIN = 0.06           # slight damping to reduce overshoot
+STEER_D_GAIN = 0.07
 STEER_I_CLAMP = 0.3
-SMOOTH_STEER_ALPHA = 0.45     # was 0.3; higher alpha tracks target faster
+SMOOTH_STEER_ALPHA = 0.50
 MAX_STEER = 1.0
 
-# Throttle
-BASE_THROTTLE = 0.33          # start modest; increase after stable
+# Throttle (raised so commanded PWM is clearly above the deadband)
+BASE_THROTTLE = 0.50
 SLOWDOWN_AT_CURVE = True
-CURVE_SLOWDOWN_GAIN = 0.45    # slow down more on curves
+CURVE_SLOWDOWN_GAIN = 0.30
+CURVATURE_SCALE = 40.0
+MIN_RUN_THROTTLE = 0.20  # never let it fall below this when auto
 
 # Safety
-NO_LINE_TIMEOUT = 1.0         # seconds since last detection -> stop
+NO_LINE_TIMEOUT = 1.0  # seconds since last detection -> stop
 
 # ------------------------------
 # PCA9685 helpers
@@ -151,7 +153,7 @@ class CameraWorker:
         self.cam.configure(config)
         self.frame = None
         self.lock = threading.Lock()
-        self.running = False
+               self.running = False
         self.period = 1.0 / CAMERA_LOOP_HZ
         self.thread = None
 
@@ -222,15 +224,13 @@ def threshold_mask(gray_roi, thresh, dark=True):
         return (gray_roi >= thresh).astype(np.uint8)
 
 def majority3x3(mask):
-    # Simple 3x3 majority filter to bridge dotted gaps
     pad = np.pad(mask, ((1,1),(1,1)), mode='edge')
-    # Sum 3x3 neighborhood
     s = (
         pad[0:-2,0:-2] + pad[0:-2,1:-1] + pad[0:-2,2:] +
         pad[1:-1,0:-2] + pad[1:-1,1:-1] + pad[1:-1,2:] +
         pad[2:  ,0:-2] + pad[2:  ,1:-1] + pad[2:  ,2:]
     )
-    return (s >= 5).astype(np.uint8)  # majority of 9
+    return (s >= 5).astype(np.uint8)
 
 def find_line_center_and_curvature(mask):
     h, w = mask.shape
@@ -249,7 +249,6 @@ def find_line_center_and_curvature(mask):
     weights = (ys + 1.0)
     weighted_center = np.nansum(row_centroids[valid]*weights[valid]) / np.nansum(weights[valid])
     center_norm = (weighted_center / (w - 1)) * 2.0 - 1.0
-    # curvature proxy: slope of centroid vs. row index
     if np.sum(valid) >= 3:
         yv = ys[valid]; cv = row_centroids[valid]
         y_mean = np.mean(yv); c_mean = np.mean(cv)
@@ -325,13 +324,18 @@ class UltraSimpleLF:
                     self.auto_mode = True
                     print("[Mode] Auto")
                 elif ch == ' ':
+                    # Emergency stop: cut throttle immediately and disable auto
+                    self.auto_mode = False
                     self.manual_throttle = 0.0
                     self.drv.stop()
-                    print("[Keys] Emergency stop")
+                    print("[Keys] Emergency stop (auto disabled)")
                 elif ch in ('c', 'C'):
+                    # Center steering: zero controller states and command center
                     self.manual_steer = 0.0
                     self.last_err = 0.0
                     self.i_err = 0.0
+                    self.filtered_steer = 0.0
+                    self.drv.set_steering(0.0)
                     print("[Keys] Center steer")
                 elif ch == '\x1b':  # ANSI arrows
                     s1 = kb.get_key(timeout=0.01)
@@ -346,7 +350,7 @@ class UltraSimpleLF:
                         elif s2 == 'D': # left
                             self.manual_steer = max(-1.0, self.manual_steer - 0.12)
                         print(f"[Manual] steer {self.manual_steer:+.2f}, throttle {self.manual_throttle:+.2f}")
-                # Apply manual
+                # Apply manual output only when auto is off
                 if not self.auto_mode:
                     spwm = self.drv.set_steering(self.manual_steer)
                     tpwm = self.drv.set_throttle(self.manual_throttle)
@@ -364,7 +368,6 @@ class UltraSimpleLF:
             # Perception
             frame = self.cam.get_frame()
             if frame is not None:
-                # Downscale by stride
                 sy = max(1, round(frame.shape[0]/PROC_H))
                 sx = max(1, round(frame.shape[1]/PROC_W))
                 small = frame[::sy, ::sx, :][:PROC_H, :PROC_W, :]
@@ -403,17 +406,17 @@ class UltraSimpleLF:
         self.last_err = err
         self.i_err = np.clip(self.i_err + err * dt, -STEER_I_CLAMP, STEER_I_CLAMP)
 
-        # Sharper steering: higher P, modest D, no I by default
         steer_raw = (STEER_P_GAIN * err) + (STEER_I_GAIN * self.i_err) + (STEER_D_GAIN * d_err)
         steer_raw = float(np.clip(steer_raw, -MAX_STEER, MAX_STEER))
         self.filtered_steer = (1.0 - SMOOTH_STEER_ALPHA) * self.filtered_steer + SMOOTH_STEER_ALPHA * steer_raw
         steer_cmd = float(np.clip(self.filtered_steer, -1.0, 1.0))
 
-        # Curve-based throttle schedule
+        # Curve-based throttle schedule with minimum run throttle
         throttle = BASE_THROTTLE
         if SLOWDOWN_AT_CURVE:
-            curve_mag = min(1.0, abs(self.last_curvature) * 50.0)  # heuristic scaling
+            curve_mag = min(1.0, abs(self.last_curvature) * CURVATURE_SCALE)
             throttle = BASE_THROTTLE * (1.0 - CURVE_SLOWDOWN_GAIN * curve_mag)
+        throttle = max(throttle, MIN_RUN_THROTTLE)
         throttle_cmd = float(np.clip(throttle, 0.0, 1.0))
 
         spwm = self.drv.set_steering(steer_cmd)
