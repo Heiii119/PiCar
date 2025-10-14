@@ -105,8 +105,8 @@ def draw_help(stdscr):
     stdscr.addstr(3, 2, "Arrow Left/Right= steering +/- step")
     stdscr.addstr(4, 2, "W/S             = throttle +/- step (alias)")
     stdscr.addstr(5, 2, "Shift+W/Shift+S = throttle +/- BIG step")
-    stdscr.addstr(6, 2, "Space           = throttle -> 1500 us (stop)")
-    stdscr.addstr(7, 2, "c               = steering -> 1600 us (center)")
+    stdscr.addstr(6, 2, "Space           = throttle -> 370 (stop)")
+    stdscr.addstr(7, 2, "c               = steering -> 383 us (center)")
     stdscr.addstr(8, 2, "i               = set ticks (0..4095) for selected channel")
     stdscr.addstr(9, 2, "u               = set microseconds for selected channel")
     stdscr.addstr(10,2, "f               = change PCA9685 frequency (Hz)")
@@ -161,9 +161,9 @@ def run(stdscr):
 
         # Enhanced status lines (kept section titles/positions)
         stdscr.addstr(15, 0, f"Selected: {items[sel_idx].upper():9s}    PCA9685 Freq: {int(freq):4d} Hz (period ~ {period_us:7.1f} us)                     ")
-        stdscr.addstr(17, 0, f"Throttle: ch{channels['throttle']}  ticks={thr:4d}  ~us={thr_us:4d}  duty={thr_dc:6.2f}%                                  ")
-        stdscr.addstr(18, 0, f"Steering: ch{channels['steering']}  ticks={ste:4d}  ~us={ste_us:4d}  duty={ste_dc:6.2f}%                                  ")
-        stdscr.addstr(20, 0, f"Stop target: 1500 us -> ticks={us_to_12bit(1500, freq)}     Center target: 1600 us -> ticks={us_to_12bit(1600, freq)}     ")
+        stdscr.addstr(17, 0, f"Throttle: ch{channels['throttle']}  ticks={thr:4d}  duty={thr_dc:6.2f}%                                  ")
+        stdscr.addstr(18, 0, f"Steering: ch{channels['steering']}  ticks={ste:4d}  duty={ste_dc:6.2f}%                                  ")
+        stdscr.addstr(20, 0, f"Stop target: ticks={us_to_12bit(1500, freq)}     Center target: ticks={us_to_12bit(1600, freq)}     ")
         stdscr.refresh()
 
     def cleanup_and_exit():
