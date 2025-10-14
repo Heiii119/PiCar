@@ -8,7 +8,7 @@ import sys
 
 PCA9685_I2C_ADDR   = 0x40
 PCA9685_I2C_BUSNUM = None
-PCA9685_FREQUENCY  = 50
+PCA9685_FREQUENCY  = 60  
 
 THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
@@ -34,7 +34,7 @@ BIG_STEP = 25   # ticks per big step (Shift)
 UI_FPS = 30.0
 
 class PCA9685Driver:
-    def __init__(self, address=0x40, busnum=None, frequency=50):
+    def __init__(self, address=0x40, busnum=None, frequency=60):
         self._mode = None
         self._driver = None
         self._freq = frequency
@@ -124,7 +124,7 @@ def run(stdscr):
 
     pwm = PCA9685Driver(address=PCA9685_I2C_ADDR, busnum=PCA9685_I2C_BUSNUM, frequency=PCA9685_FREQUENCY)
 
-    # Initial values per request
+    # Initial values
     values = {
         "throttle": us_to_12bit(1500, pwm.frequency),
         "steering": us_to_12bit(1600, pwm.frequency),
@@ -150,7 +150,8 @@ def run(stdscr):
         pwm.set_pwm_12bit(channels["steering"], values["steering"])
 
     def redraw():
-        freq = pwm.frequency
+        freq = float(pwm.frequency)
+        period_us = 1_000_000.0 / freq
         thr = values["throttle"]
         ste = values["steering"]
         thr_us = ticks_to_us(thr, freq)
@@ -158,10 +159,11 @@ def run(stdscr):
         thr_dc = ticks_to_duty_pct(thr)
         ste_dc = ticks_to_duty_pct(ste)
 
-        stdscr.addstr(15, 0, f"Selected: {items[sel_idx].upper():9s}    PCA9685 Freq: {int(freq):4d} Hz                                ")
-        stdscr.addstr(17, 0, f"Throttle: ch{channels['throttle']}  ticks={thr:4d}  ~us={thr_us:4d}  duty={thr_dc:6.2f}%                 ")
-        stdscr.addstr(18, 0, f"Steering: ch{channels['steering']}  ticks={ste:4d}  ~us={ste_us:4d}  duty={ste_dc:6.2f}%                 ")
-        stdscr.addstr(20, 0, f"Stop target: 1500 us -> ticks={us_to_12bit(1500, freq)}     Center target: 1600 us -> ticks={us_to_12bit(1600, freq)}   ")
+        # Enhanced status lines (kept section titles/positions)
+        stdscr.addstr(15, 0, f"Selected: {items[sel_idx].upper():9s}    PCA9685 Freq: {int(freq):4d} Hz (period ~ {period_us:7.1f} us)                     ")
+        stdscr.addstr(17, 0, f"Throttle: ch{channels['throttle']}  ticks={thr:4d}  ~us={thr_us:4d}  duty={thr_dc:6.2f}%                                  ")
+        stdscr.addstr(18, 0, f"Steering: ch{channels['steering']}  ticks={ste:4d}  ~us={ste_us:4d}  duty={ste_dc:6.2f}%                                  ")
+        stdscr.addstr(20, 0, f"Stop target: 1500 us -> ticks={us_to_12bit(1500, freq)}     Center target: 1600 us -> ticks={us_to_12bit(1600, freq)}     ")
         stdscr.refresh()
 
     def cleanup_and_exit():
@@ -185,7 +187,7 @@ def run(stdscr):
                     return
 
                 # Switch selected channel (for i/u input convenience)
-                elif ch in (curses.KEY_BTAB, 9):  # Shift+Tab maps to KEY_BTAB; 9 is Tab
+                elif ch in (curses.KEY_BTAB, 9):  # Shift+Tab -> KEY_BTAB; 9 -> Tab
                     sel_idx = (sel_idx + 1) % len(items)
 
                 # Throttle adjustments (Up/Down and W/S)
@@ -232,13 +234,14 @@ def run(stdscr):
 
                 # Frequency change
                 elif ch in (ord('f'), ord('F')):
-                    s = prompt_input(stdscr, 22, 0, "Enter PCA9685 frequency in Hz (e.g., 50): ")
+                    s = prompt_input(stdscr, 22, 0, f"Enter PCA9685 frequency in Hz (current {int(pwm.frequency)}): ")
                     try:
                         hz = int(float(s))
                         hz = max(24, min(1526, hz))
                         pwm.set_pwm_freq(hz)
-                        # reapply ticks (ticks unchanged; duty mapping applies inside driver)
-                        apply_outputs()
+                        # Re-apply current ticks (mapping inside driver handles duty)
+                        pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
+                        pwm.set_pwm_12bit(channels["steering"], values["steering"])
                     except Exception:
                         pass
 
