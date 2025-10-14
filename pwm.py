@@ -106,7 +106,7 @@ def draw_help(stdscr):
     stdscr.addstr(4, 2, "W/S             = throttle +/- step (alias)")
     stdscr.addstr(5, 2, "Shift+W/Shift+S = throttle +/- BIG step")
     stdscr.addstr(6, 2, "Space           = throttle -> 370 (stop)")
-    stdscr.addstr(7, 2, "c               = steering -> 383 us (center)")
+    stdscr.addstr(7, 2, "c               = steering -> 383 (center)")
     stdscr.addstr(8, 2, "i               = set ticks (0..4095) for selected channel")
     stdscr.addstr(9, 2, "u               = set microseconds for selected channel")
     stdscr.addstr(10,2, "f               = change PCA9685 frequency (Hz)")
