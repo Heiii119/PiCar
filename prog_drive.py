@@ -37,7 +37,7 @@ CFG = {
 
 # Routine settings
 FORWARD_SEC = 2.0
-RIGHT_SEC = 5.0
+RIGHT_SEC = 4.5
 LOOPS = 6
 
 # ------------------------------
