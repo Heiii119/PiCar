@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Ultra-Responsive Simple Line Follower (no TF, no OpenCV, no recording)
+# Target: Black track with yellow dotted line
 # - Decoupled loops: control (250 Hz), camera (25 Hz)
-# - Keyboard: h manual, a auto, space stop, c center, q quit; arrows adjust manual steer/throttle
+# - Keyboard: h manual, a auto, arrows steer/throttle, space stop, c center, q quit
 # - PID-style steering with smoothing; curvature-aware throttle slowdown
-# - Minimal code footprint while retaining robust behavior
+# - Robust bright-line detection with small 2D majority filter to handle dotted gaps
 
 import time
 import sys
@@ -23,18 +24,18 @@ import busio
 from adafruit_pca9685 import PCA9685
 
 # ------------------------------
-# Configuration
+# Configuration (updated PWMs)
 # ------------------------------
 CFG = {
     "PWM_STEERING_PIN": "PCA9685.1:0x40.1",
     "PWM_STEERING_INVERTED": False,
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",
     "PWM_THROTTLE_INVERTED": False,
-    "STEERING_LEFT_PWM": 280,
-    "STEERING_RIGHT_PWM": 470,
-    "THROTTLE_FORWARD_PWM": 400,  # adjust as needed
-    "THROTTLE_STOPPED_PWM": 370,  # adjust as needed
-    "THROTTLE_REVERSE_PWM": 290,  # adjust as needed
+    "STEERING_LEFT_PWM": 270,     # updated
+    "STEERING_RIGHT_PWM": 470,    # updated
+    "THROTTLE_FORWARD_PWM": 420,  # updated
+    "THROTTLE_STOPPED_PWM": 370,  # updated
+    "THROTTLE_REVERSE_PWM": 290,  # updated
 }
 
 # Camera
@@ -44,34 +45,34 @@ HFLIP, VFLIP = False, False
 # Processing size (downscale for speed)
 PROC_W, PROC_H = 160, 120
 
-# Line detection
-LINE_IS_DARK = True
-ROI_FRACTION = (0.55, 0.95)   # bottom 40%
-THRESH = 0.45                 # grayscale threshold [0..1]
-MIN_PIXELS = 30
+# Line detection (yellow on black -> bright line)
+LINE_IS_DARK = False
+ROI_FRACTION = (0.60, 0.92)   # focus near bottom; tweak per camera tilt
+THRESH = 0.60                 # try 0.55–0.70
+MIN_PIXELS = 40               # a bit higher because of bright-on-dark
 
 # Loops
 CONTROL_LOOP_HZ = 250
 CAMERA_LOOP_HZ  = 25
 
-# Control: steering
-STEER_P_GAIN = 0.9
-STEER_I_GAIN = 0.0
-STEER_D_GAIN = 0.05
+# Control: sharper steering (increase P, keep D; reduce smoothing)
+STEER_P_GAIN = 1.30           # was ~0.9; higher = sharper turns
+STEER_I_GAIN = 0.00
+STEER_D_GAIN = 0.06           # slight damping to reduce overshoot
 STEER_I_CLAMP = 0.3
-SMOOTH_STEER_ALPHA = 0.3
+SMOOTH_STEER_ALPHA = 0.45     # was 0.3; higher alpha tracks target faster
 MAX_STEER = 1.0
 
 # Throttle
-BASE_THROTTLE = 0.35
+BASE_THROTTLE = 0.33          # start modest; increase after stable
 SLOWDOWN_AT_CURVE = True
-CURVE_SLOWDOWN_GAIN = 0.4  # fraction of speed reduction at high curvature
+CURVE_SLOWDOWN_GAIN = 0.45    # slow down more on curves
 
 # Safety
-NO_LINE_TIMEOUT = 1.0  # seconds since last detection -> stop
+NO_LINE_TIMEOUT = 1.0         # seconds since last detection -> stop
 
 # ------------------------------
-# Helpers
+# PCA9685 helpers
 # ------------------------------
 def parse_pca9685_pin(pin_str):
     left, chan = pin_str.split(":")
@@ -136,6 +137,9 @@ class Driver:
         time.sleep(0.1)
         self.pca.deinit()
 
+# ------------------------------
+# Camera worker (decoupled loop)
+# ------------------------------
 class CameraWorker:
     def __init__(self, w=CAM_W, h=CAM_H, hflip=HFLIP, vflip=VFLIP):
         self.cam = Picamera2()
@@ -181,7 +185,9 @@ class CameraWorker:
                 return None
             return self.frame.copy()
 
+# ------------------------------
 # Keyboard (non-blocking)
+# ------------------------------
 class RawKeyboard:
     def __enter__(self):
         self.fd = sys.stdin.fileno()
@@ -215,9 +221,16 @@ def threshold_mask(gray_roi, thresh, dark=True):
     else:
         return (gray_roi >= thresh).astype(np.uint8)
 
-def majority3_horizontal(mask):
-    pad = np.pad(mask, ((0,0),(1,1)), mode='edge')
-    return ((pad[:,0:-2] + pad[:,1:-1] + pad[:,2:]) >= 2).astype(np.uint8)
+def majority3x3(mask):
+    # Simple 3x3 majority filter to bridge dotted gaps
+    pad = np.pad(mask, ((1,1),(1,1)), mode='edge')
+    # Sum 3x3 neighborhood
+    s = (
+        pad[0:-2,0:-2] + pad[0:-2,1:-1] + pad[0:-2,2:] +
+        pad[1:-1,0:-2] + pad[1:-1,1:-1] + pad[1:-1,2:] +
+        pad[2:  ,0:-2] + pad[2:  ,1:-1] + pad[2:  ,2:]
+    )
+    return (s >= 5).astype(np.uint8)  # majority of 9
 
 def find_line_center_and_curvature(mask):
     h, w = mask.shape
@@ -320,7 +333,7 @@ class UltraSimpleLF:
                     self.last_err = 0.0
                     self.i_err = 0.0
                     print("[Keys] Center steer")
-                elif ch == '\x1b':  # expect ANSI arrow
+                elif ch == '\x1b':  # ANSI arrows
                     s1 = kb.get_key(timeout=0.01)
                     s2 = kb.get_key(timeout=0.01)
                     if s1 == '[' and s2 in ('A','B','C','D'):
@@ -329,11 +342,11 @@ class UltraSimpleLF:
                         elif s2 == 'B': # down
                             self.manual_throttle = max(-1.0, self.manual_throttle - 0.05)
                         elif s2 == 'C': # right
-                            self.manual_steer = min(1.0, self.manual_steer + 0.1)
+                            self.manual_steer = min(1.0, self.manual_steer + 0.12)
                         elif s2 == 'D': # left
-                            self.manual_steer = max(-1.0, self.manual_steer - 0.1)
+                            self.manual_steer = max(-1.0, self.manual_steer - 0.12)
                         print(f"[Manual] steer {self.manual_steer:+.2f}, throttle {self.manual_throttle:+.2f}")
-                # Apply when manual
+                # Apply manual
                 if not self.auto_mode:
                     spwm = self.drv.set_steering(self.manual_steer)
                     tpwm = self.drv.set_throttle(self.manual_throttle)
@@ -358,7 +371,7 @@ class UltraSimpleLF:
                 gray = to_gray_norm(small)
                 roi = get_roi(gray, ROI_FRACTION)
                 mask = threshold_mask(roi, THRESH, dark=LINE_IS_DARK)
-                mask = majority3_horizontal(mask)
+                mask = majority3x3(mask)
                 center_norm, curvature = find_line_center_and_curvature(mask)
                 if center_norm is not None:
                     self.last_line_time = tnow
@@ -390,11 +403,13 @@ class UltraSimpleLF:
         self.last_err = err
         self.i_err = np.clip(self.i_err + err * dt, -STEER_I_CLAMP, STEER_I_CLAMP)
 
+        # Sharper steering: higher P, modest D, no I by default
         steer_raw = (STEER_P_GAIN * err) + (STEER_I_GAIN * self.i_err) + (STEER_D_GAIN * d_err)
         steer_raw = float(np.clip(steer_raw, -MAX_STEER, MAX_STEER))
         self.filtered_steer = (1.0 - SMOOTH_STEER_ALPHA) * self.filtered_steer + SMOOTH_STEER_ALPHA * steer_raw
         steer_cmd = float(np.clip(self.filtered_steer, -1.0, 1.0))
 
+        # Curve-based throttle schedule
         throttle = BASE_THROTTLE
         if SLOWDOWN_AT_CURVE:
             curve_mag = min(1.0, abs(self.last_curvature) * 50.0)  # heuristic scaling
