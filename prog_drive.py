@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-# Simple timed driver:
-# - Forward 3s, Right 10s, loop 6 times
-# - Exact PWM mapping as provided
-# - Space: emergency stop/pause, r: reset routine, c: center steering, q: quit
+# Timed driver with explicit start:
+# - Idle at rest after start
+# - Press 's' to start the loop: Forward 2s, Right 7s, repeat 6 times
+# - Space: emergency stop/pause (neutral)
+# - r: reset routine back to beginning (remains paused until 's')
+# - c: center steering immediately
+# - q: quit
 
 import time
 import sys
@@ -34,7 +37,7 @@ CFG = {
 
 # Routine settings
 FORWARD_SEC = 2.0
-RIGHT_SEC = 8.0
+RIGHT_SEC = 7.0
 LOOPS = 6
 
 # ------------------------------
@@ -76,7 +79,6 @@ class Driver:
         self.pca.channels[self.t_ch].duty_cycle = self._to_duty(pwm4095)
 
     def center_steering(self):
-        # Center is approximately midpoint of left/right
         left = self.cfg["STEERING_LEFT_PWM"]
         right = self.cfg["STEERING_RIGHT_PWM"]
         center = int(round((left + right) / 2))
@@ -116,11 +118,17 @@ class TimedDriver:
         self.cfg = cfg
         self.drv = Driver(cfg)
         self.running = True
-        self.paused = False
+        self.paused = True          # start paused/idle
         self.reset_requested = False
+        self.start_requested = False
         self.thread = None
 
     def start(self):
+        # Ensure neutral and centered on start
+        self.drv.stop()
+        ctr = self.drv.center_steering()
+        print(f"[Init] Neutral throttle, center steering PWM {ctr}")
+        print("Controls: s=START, space=EMERGENCY STOP/PAUSE, r=RESET, c=CENTER, q=QUIT")
         self.thread = threading.Thread(target=self.run_routine, daemon=True)
         self.thread.start()
         self.keyboard_loop()
@@ -136,7 +144,6 @@ class TimedDriver:
         self.drv.close()
 
     def keyboard_loop(self):
-        print("Controls: space=EMERGENCY STOP/PAUSE, r=RESET routine, c=CENTER steer, q=QUIT")
         with RawKeyboard() as kb:
             while self.running:
                 ch = kb.get_key(timeout=0.05)
@@ -146,6 +153,10 @@ class TimedDriver:
                     print("[Keys] Quit requested")
                     self.running = False
                     break
+                elif ch in ('s', 'S'):
+                    self.start_requested = True
+                    self.paused = False
+                    print("[Keys] Start routine")
                 elif ch == ' ':
                     # Emergency stop/pause: neutral throttle, keep routine paused
                     self.paused = True
@@ -154,10 +165,11 @@ class TimedDriver:
                         self.drv.stop()
                         time.sleep(0.1)
                 elif ch in ('r', 'R'):
-                    # Reset routine from start
+                    # Reset routine from start; remains paused until 's'
                     self.reset_requested = True
-                    self.paused = False
-                    print("[Keys] Reset requested; routine will restart from beginning")
+                    self.paused = True
+                    self.start_requested = False
+                    print("[Keys] Reset requested; routine reset and paused (press 's' to start)")
                 elif ch in ('c', 'C'):
                     ctr = self.drv.center_steering()
                     print(f"[Keys] Center steering -> PWM {ctr}")
@@ -165,68 +177,81 @@ class TimedDriver:
         self.stop()
 
     def run_routine(self):
-        loops_done = 0
         cfg = self.cfg
         forward_pwm = cfg["THROTTLE_FORWARD_PWM"]
         stop_pwm = cfg["THROTTLE_STOPPED_PWM"]
         right_pwm = cfg["STEERING_RIGHT_PWM"]
         center_pwm = int(round((cfg["STEERING_LEFT_PWM"] + cfg["STEERING_RIGHT_PWM"]) / 2))
 
-        while self.running and loops_done < LOOPS:
-            # Check reset
+        loops_done = 0
+
+        while self.running:
+            # Wait for explicit start
+            while self.running and (self.paused or not self.start_requested):
+                self.drv.set_throttle_pwm(stop_pwm)
+                time.sleep(0.05)
+            if not self.running:
+                break
+
+            # If reset came in, clear counters and continue waiting if still paused
             if self.reset_requested:
                 loops_done = 0
                 self.reset_requested = False
-                print("[Routine] Reset: starting over at loop 1")
+                print("[Routine] Reset: ready to start from loop 1")
 
-            # Pause handling
-            while self.running and self.paused and not self.reset_requested:
-                self.drv.stop()
-                time.sleep(0.05)
-
-            if not self.running:
-                break
-            if self.reset_requested:
-                continue
-
-            # Step 1: Forward 3s
-            print(f"[Routine] Loop {loops_done+1}/{LOOPS}: Forward {FORWARD_SEC:.1f}s")
-            self.drv.set_steering_pwm(center_pwm)
-            t_end = time.time() + FORWARD_SEC
-            while self.running and time.time() < t_end and not self.reset_requested:
-                if self.paused:
+            # Execute loops
+            while self.running and self.start_requested and not self.paused and loops_done < LOOPS:
+                # Check reset during run
+                if self.reset_requested:
+                    loops_done = 0
+                    self.reset_requested = False
+                    self.paused = True
+                    self.start_requested = False
+                    print("[Routine] Reset during run: paused, press 's' to start again")
                     break
-                self.drv.set_throttle_pwm(forward_pwm)
-                time.sleep(0.02)
-            self.drv.set_throttle_pwm(stop_pwm)
 
-            # Pause/reset break
-            if not self.running or self.reset_requested:
-                continue
-            while self.running and self.paused and not self.reset_requested:
-                self.drv.stop()
-                time.sleep(0.05)
-            if not self.running or self.reset_requested:
-                continue
+                # Step 1: Forward FORWARD_SEC
+                print(f"[Routine] Loop {loops_done+1}/{LOOPS}: Forward {FORWARD_SEC:.1f}s")
+                self.drv.set_steering_pwm(center_pwm)
+                t_end = time.time() + FORWARD_SEC
+                while self.running and time.time() < t_end:
+                    if self.paused or not self.start_requested or self.reset_requested:
+                        break
+                    self.drv.set_throttle_pwm(forward_pwm)
+                    time.sleep(0.02)
+                self.drv.set_throttle_pwm(stop_pwm)
 
-            # Step 2: Turn right 10s (hold throttle forward while steering right)
-            print(f"[Routine] Loop {loops_done+1}/{LOOPS}: Right turn {RIGHT_SEC:.1f}s")
-            self.drv.set_steering_pwm(right_pwm)
-            t_end = time.time() + RIGHT_SEC
-            while self.running and time.time() < t_end and not self.reset_requested:
-                if self.paused:
-                    break
-                self.drv.set_throttle_pwm(forward_pwm)
-                time.sleep(0.02)
-            self.drv.set_throttle_pwm(stop_pwm)
+                if self.paused or not self.start_requested or self.reset_requested or not self.running:
+                    continue
 
-            # Completed one loop
-            if not self.paused and not self.reset_requested:
-                loops_done += 1
+                # Step 2: Right turn RIGHT_SEC (hold throttle forward while steering right)
+                print(f"[Routine] Loop {loops_done+1}/{LOOPS}: Right turn {RIGHT_SEC:.1f}s")
+                self.drv.set_steering_pwm(right_pwm)
+                t_end = time.time() + RIGHT_SEC
+                while self.running and time.time() < t_end:
+                    if self.paused or not self.start_requested or self.reset_requested:
+                        break
+                    self.drv.set_throttle_pwm(forward_pwm)
+                    time.sleep(0.02)
+                self.drv.set_throttle_pwm(stop_pwm)
 
-        # Finish: stop and center
-        print("[Routine] Finished or stopped; sending neutral and centering")
-        self.drv.stop()
+                # Increment loop count if not interrupted
+                if self.running and not self.paused and self.start_requested and not self.reset_requested:
+                    loops_done += 1
+
+            # If finished all loops, stop and require a new start
+            if loops_done >= LOOPS:
+                print("[Routine] Completed all loops. Pausing at neutral. Press 's' to run again or 'q' to quit.")
+                self.drv.set_throttle_pwm(stop_pwm)
+                self.drv.set_steering_pwm(center_pwm)
+                # Prepare for next start
+                loops_done = 0
+                self.paused = True
+                self.start_requested = False
+
+        # Final cleanup
+        print("[Routine] Exiting; neutral and centering")
+        self.drv.set_throttle_pwm(stop_pwm)
         self.drv.set_steering_pwm(center_pwm)
 
 # ------------------------------
