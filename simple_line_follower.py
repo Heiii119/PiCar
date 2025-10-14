@@ -153,7 +153,7 @@ class CameraWorker:
         self.cam.configure(config)
         self.frame = None
         self.lock = threading.Lock()
-               self.running = False
+        self.running = False
         self.period = 1.0 / CAMERA_LOOP_HZ
         self.thread = None
 
