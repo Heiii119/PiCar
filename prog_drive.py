@@ -27,14 +27,14 @@ CFG = {
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 270,
     "STEERING_RIGHT_PWM": 495,
-    "THROTTLE_FORWARD_PWM": 400,
+    "THROTTLE_FORWARD_PWM": 390,
     "THROTTLE_STOPPED_PWM": 370,
     "THROTTLE_REVERSE_PWM": 290,
 }
 
 # Routine settings
-FORWARD_SEC = 3.0
-RIGHT_SEC = 10.0
+FORWARD_SEC = 2.0
+RIGHT_SEC = 8.0
 LOOPS = 6
 
 # ------------------------------
