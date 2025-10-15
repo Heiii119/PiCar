@@ -41,9 +41,9 @@ COLOR_FLIP_BGR2RGB = True
 INVERT_STEER = False
 
 # 4) Global tuning
-roi_height_default = 0.35    # bottom 35% of the frame
-deadband_default = 0.05      # normalized center error deadband
-min_coverage_default = 0.002 # ~0.2% of ROI pixels must match to accept
+roi_height_default = 0.45    # bottom 35% of the frame
+deadband_default = 0.09      # normalized center error deadband
+min_coverage_default = 0.005 # ~0.2% of ROI pixels must match to accept
 
 # 5) Per-color HSV presets (degrees for hue; 0..255 for S, V thresholds)
 LINE_COLOR_PRESETS = {
@@ -54,8 +54,8 @@ LINE_COLOR_PRESETS = {
     },
     "yellow": {  # yellow on dark (black track)
         "type": "color",
-        "h_lo": 20.0,
-        "h_hi": 40.0,
+        "h_lo": 10.0,
+        "h_hi": 50.0,
         "s_min": 80,
         "v_min": 70,
     },
