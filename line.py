@@ -87,7 +87,7 @@ BIN_THRESH = 0.45           # Threshold on normalized grayscale [0..1]
 H_LO_DEG = 10.0
 H_HI_DEG = 50.0
 S_MIN = 70        # 0..100
-V_MIN = 200        # 0..100
+V_MIN = 30        # 0..100
 
 # ------------------------------
 # Utility: PCA9685 helper
