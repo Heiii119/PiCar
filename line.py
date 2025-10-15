@@ -558,8 +558,10 @@ class LineFollowerDiscrete:
                     self.last_line_time = tnow
                     self.last_center_err = center_norm
                     self.last_curvature = curvature
-                    # If we were in reverse search, clear its timer after reacquiring
+                    # Clear reverse-search timers/phases on re-acquire
                     self.no_line_start_time = None
+                    self.no_line_phase = "idle"
+                    self.no_line_phase_start = None
 
             # Drive
             spwm, tpwm = self.compute_and_drive_discrete(tnow)
