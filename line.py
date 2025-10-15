@@ -6,9 +6,9 @@
 # - Keyboard: h manual, a auto, r record, space stop, c center, p status, arrows/WASD manual, q quit
 #
 # Run examples:
-#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py
-#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py --mode gray
-#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py --mode color --calibrate
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line.py
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line.py --mode gray
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line.py --mode color --calibrate
 #
 # Tip: If your terminal becomes garbled after a crash, run `reset`.
 
