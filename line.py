@@ -45,7 +45,7 @@ PWM_STEERING_THROTTLE = {
     "STEERING_RIGHT_PWM": 480,
     "THROTTLE_FORWARD_PWM": 390,
     "THROTTLE_STOPPED_PWM": 370,
-    "THROTTLE_REVERSE_PWM": 340,  # updated per request
+    "THROTTLE_REVERSE_PWM": 300,  # updated per request
 }
 
 # Discrete decision thresholds (normalized error in [-1,1])
