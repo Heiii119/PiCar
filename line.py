@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# Meta Dot PiCar Line Follower (Discrete: LEFT/STRAIGHT/RIGHT)
-# - Camera loop ~25 Hz, control loop 250 Hz
-# - Discrete steering using fixed PWMs with hysteresis
-# - No OpenCV needed
-# - Keyboard: WASD/arrows (manual), space stop, c center, r record, h manual, a auto, q quit, p print decision
+# Meta Dot PiCar Line Follower (Discrete) with curses dashboard
+# - Discrete LEFT/STRAIGHT/RIGHT steering (fixed PWMs, hysteresis)
+# - Curses dashboard via stdscr.addstr()
+# - Keyboard inside curses: h manual, a auto, r record, space stop, c center, p print decision line, q quit
+# - Arrows/WASD for manual throttle/steer (when in manual)
 #
 # Run:
-#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete.py
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py
+#
+# Tip: If your terminal becomes garbled after crash, run `reset`.
 
 import os
 import sys
 import time
 import csv
-import tty
-import termios
-import select
 import threading
 from datetime import datetime
+import curses
 
 import numpy as np
 
@@ -38,8 +38,8 @@ PWM_STEERING_THROTTLE = {
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # ensure 0x40
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 280,
-    "STEERING_RIGHT_PWM": 470,
-    "THROTTLE_FORWARD_PWM": 500,
+    "STEERING_RIGHT_PWM": 480,
+    "THROTTLE_FORWARD_PWM": 393,
     "THROTTLE_STOPPED_PWM": 370,
     "THROTTLE_REVERSE_PWM": 220,
 }
@@ -53,11 +53,12 @@ NO_LINE_TIMEOUT = 1.0  # seconds without detection -> neutral throttle
 
 # Throttle/curve behavior
 USE_CURVE_SLOWDOWN = True
-CURVE_SLOWDOWN_GAIN = 0.4  # 0..1 scale; 0=no slowdown, 1=max slowdown
+CURVE_SLOWDOWN_GAIN = 0.4  # 0..1 scale
 
 # Loops
 CONTROL_LOOP_HZ = 250
 CAMERA_LOOP_HZ = 25
+STATUS_HZ = 10
 MAX_LOOPS = None  # None = run forever
 
 # Image sizes
@@ -102,7 +103,6 @@ class MotorServoController:
         self.channel_steer = s_ch
         self.channel_throttle = t_ch
         self.i2c = busio.I2C(board.SCL, board.SDA)
-        print(f"[PCA9685] I2C bus {s_bus}, addr 0x{s_addr:02x}, steer ch {s_ch}, throttle ch {t_ch}", flush=True)
         self.pca = PCA9685(self.i2c, address=s_addr)
         self.pca.frequency = 60
         self.cfg = config
@@ -126,24 +126,6 @@ class MotorServoController:
         self.stop()
         time.sleep(0.1)
         self.pca.deinit()
-
-# ------------------------------
-# Keyboard (no OpenCV)
-# ------------------------------
-class RawKeyboard:
-    def __enter__(self):
-        self.fd = sys.stdin.fileno()
-        self.old_settings = termios.tcgetattr(self.fd)
-        tty.setcbreak(self.fd)
-        return self
-    def __exit__(self, exc_type, exc, tb):
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
-    def get_key(self, timeout=0.0):
-        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-        if rlist:
-            ch = sys.stdin.read(1)
-            return ch
-        return None
 
 # ------------------------------
 # Camera helper
@@ -203,10 +185,9 @@ def to_gray_norm(rgb):
 
 def binary_threshold(gray, thresh, invert=False):
     if invert:
-        mask = (gray >= thresh).astype(np.uint8)  # bright line
+        return (gray >= thresh).astype(np.uint8)
     else:
-        mask = (gray <= thresh).astype(np.uint8)  # dark line
-    return mask
+        return (gray <= thresh).astype(np.uint8)
 
 def roi_slice(h, roi_frac):
     y0 = int(h * roi_frac[0])
@@ -241,7 +222,7 @@ def find_line_center(mask):
         c_mean = np.mean(c_valid)
         denom = np.sum((y_valid - y_mean)**2) + 1e-6
         slope = np.sum((y_valid - y_mean) * (c_valid - c_mean)) / denom
-        curvature = slope / (mask.shape[1] + 1e-6)
+        curvature = slope / (w + 1e-6)
     else:
         curvature = 0.0
 
@@ -251,8 +232,9 @@ def find_line_center(mask):
 # Discrete line follower
 # ------------------------------
 class LineFollowerDiscrete:
-    def __init__(self, cfg):
+    def __init__(self, cfg, stdscr):
         self.cfg = cfg
+        self.stdscr = stdscr
         self.motors = MotorServoController(cfg)
         self.camera = CameraWorker(stream_w=CAM_STREAM_W, stream_h=CAM_STREAM_H,
                                    hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP)
@@ -263,114 +245,134 @@ class LineFollowerDiscrete:
         self.last_line_time = 0.0
 
         self.ctrl_period = 1.0 / CONTROL_LOOP_HZ
+        self.status_period = 1.0 / STATUS_HZ
+        self.next_status_t = time.time()
 
         self.last_center_err = 0.0
         self.last_curvature = 0.0
-
-        # Discrete decision with hysteresis
         self.last_decision = "STRAIGHT"
 
         # Recording
         self.data_dir = None
         self.frame_id = 0
 
-        # Thread
-        self.thread = None
+        # Perf meters
+        self.ctrl_count = 0
+        self.cam_count = 0
+        self.ctrl_t0 = time.time()
+        self.cam_t0 = time.time()
 
+        # Manual control
+        self.manual_steer_pwm = self.motors.steering_center_pwm()
+        self.manual_throttle_pwm = self.cfg["THROTTLE_STOPPED_PWM"]
+
+        # Message line
+        self.msg = ""
+
+    # ------------- Lifecycle -------------
     def start(self):
-        print("[Camera] Starting...", flush=True)
         self.camera.start()
+        # Wait for first frame (briefly)
         t0 = time.time()
         while self.camera.get_frame() is None and time.time() - t0 < 2.0:
-            time.sleep(0.05)
-        print("[Camera] OK", flush=True)
+            time.sleep(0.02)
 
+        # Curses setup
+        self.stdscr.nodelay(True)  # non-blocking getch
+        curses.curs_set(0)         # hide cursor
+        self.draw_status(force=True)
+
+        # Start control loop thread
         self.running = True
-        self.thread = threading.Thread(target=self.control_loop, daemon=True)
-        self.thread.start()
+        t = threading.Thread(target=self.control_loop, daemon=True)
+        t.start()
+
+        # Keyboard loop inside curses main thread
         self.keyboard_loop()
 
-    def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
+        # Cleanup
         self.camera.stop()
         self.motors.stop()
         self.motors.close()
 
-    # -------------------------- Keyboard --------------------------
+    def stop(self):
+        self.running = False
+
+    # ------------- Keyboard -------------
     def keyboard_loop(self):
-        print("[Keys] h manual, a auto, r record, WASD/Arrows manual, space stop, c center, p print decision, q quit", flush=True)
-        manual_steer_pwm = self.motors.steering_center_pwm()
-        manual_throttle_pwm = self.cfg["THROTTLE_STOPPED_PWM"]
-        with RawKeyboard() as kb:
-            while self.running:
-                ch = kb.get_key(timeout=0.05)
-                if ch is None:
-                    continue
-                if ch in ('q', 'Q'):
-                    print("[Keys] Quit", flush=True)
-                    self.running = False
-                    break
-                elif ch in ('h', 'H'):
-                    self.auto_mode = False
-                    print("[Mode] Manual", flush=True)
-                elif ch in ('a', 'A'):
-                    self.auto_mode = True
-                    print("[Mode] Auto (discrete line following)", flush=True)
-                elif ch in ('r', 'R'):
-                    self.recording = not self.recording
-                    if self.recording and self.data_dir is None:
-                        self._start_recording()
-                    print(f"[Rec] {'ON' if self.recording else 'OFF'} -> {self.data_dir}", flush=True)
-                elif ch == ' ':
-                    manual_throttle_pwm = self.cfg["THROTTLE_STOPPED_PWM"]
-                    self.motors.stop()
-                    print("[Keys] Emergency stop", flush=True)
-                elif ch in ('c', 'C'):
-                    manual_steer_pwm = self.motors.steering_center_pwm()
-                    print(f"[Keys] Center steer -> {manual_steer_pwm}", flush=True)
-                elif ch in ('p', 'P'):
-                    print(f"[State] decision={self.last_decision}, err={self.last_center_err:+.3f}", flush=True)
-                # Manual: WASD/arrows
-                elif ch in ('w', 'W'):
-                    manual_throttle_pwm = min(4095, manual_throttle_pwm + 10)
-                    print(f"[Manual] throttle PWM {manual_throttle_pwm}", flush=True)
-                elif ch in ('s', 'S'):
-                    manual_throttle_pwm = max(0, manual_throttle_pwm - 10)
-                    print(f"[Manual] throttle PWM {manual_throttle_pwm}", flush=True)
-                elif ch == '\x1b':  # arrows
-                    s1 = kb.get_key(timeout=0.01)
-                    s2 = kb.get_key(timeout=0.01)
-                    if s1 == '[' and s2 in ('A','B','C','D'):
-                        if s2 == 'A':
-                            manual_throttle_pwm = min(4095, manual_throttle_pwm + 10)
-                        elif s2 == 'B':
-                            manual_throttle_pwm = max(0, manual_throttle_pwm - 10)
-                        elif s2 == 'C':  # right
-                            manual_steer_pwm = self.cfg["STEERING_RIGHT_PWM"]
-                        elif s2 == 'D':  # left
-                            manual_steer_pwm = self.cfg["STEERING_LEFT_PWM"]
-                        print(f"[Manual] steerPWM {manual_steer_pwm}, throttlePWM {manual_throttle_pwm}", flush=True)
+        while self.running:
+            ch = self.stdscr.getch()
+            if ch == -1:
+                # update status at STATUS_HZ
+                now = time.time()
+                if now >= self.next_status_t:
+                    self.draw_status()
+                    self.next_status_t = now + self.status_period
+                time.sleep(0.01)
+                continue
 
-                if not self.auto_mode:
-                    spwm = self.motors.set_pwm_raw(self.motors.channel_steer, manual_steer_pwm)
-                    tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, manual_throttle_pwm)
-                    print(f"[Out][MAN] steerPWM {spwm:4d} | throttlePWM {tpwm:4d}", flush=True)
+            # Normalize codes
+            if ch in (ord('q'), ord('Q')):
+                self.msg = "Quit requested"
+                self.stop()
+                break
+            elif ch in (ord('h'), ord('H')):
+                self.auto_mode = False
+                self.msg = "Mode: MANUAL"
+            elif ch in (ord('a'), ord('A')):
+                self.auto_mode = True
+                self.msg = "Mode: AUTO (discrete)"
+            elif ch in (ord('r'), ord('R')):
+                self.recording = not self.recording
+                if self.recording and self.data_dir is None:
+                    self._start_recording()
+                self.msg = f"Recording: {'ON' if self.recording else 'OFF'}"
+            elif ch == ord(' '):
+                self.manual_throttle_pwm = self.cfg["THROTTLE_STOPPED_PWM"]
+                self.motors.stop()
+                self.msg = "Emergency stop (neutral throttle)"
+            elif ch in (ord('c'), ord('C')):
+                self.manual_steer_pwm = self.motors.steering_center_pwm()
+                self.msg = f"Center steer -> {self.manual_steer_pwm}"
+            elif ch in (ord('p'), ord('P')):
+                self.msg = f"Decision={self.last_decision}, err={self.last_center_err:+.3f}"
 
-        self.stop()
+            # Arrows / WASD
+            elif ch in (ord('w'), ord('W')):
+                self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 10)
+                self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
+            elif ch in (ord('s'), ord('S')):
+                self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 10)
+                self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
+            elif ch == curses.KEY_UP:
+                self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 10)
+                self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
+            elif ch == curses.KEY_DOWN:
+                self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 10)
+                self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
+            elif ch == curses.KEY_LEFT:
+                self.manual_steer_pwm = self.cfg["STEERING_LEFT_PWM"]
+                self.msg = f"Manual steer LEFT {self.manual_steer_pwm}"
+            elif ch == curses.KEY_RIGHT:
+                self.manual_steer_pwm = self.cfg["STEERING_RIGHT_PWM"]
+                self.msg = f"Manual steer RIGHT {self.manual_steer_pwm}"
 
-    # -------------------------- Control loop --------------------------
+            # Apply manual immediately in manual mode
+            if not self.auto_mode:
+                spwm = self.motors.set_pwm_raw(self.motors.channel_steer, self.manual_steer_pwm)
+                tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, self.manual_throttle_pwm)
+
+            self.draw_status()
+
+    # ------------- Control loop -------------
     def control_loop(self):
         next_t = time.time()
         loops = 0
         while self.running and (MAX_LOOPS is None or loops < MAX_LOOPS):
             tnow = time.time()
+
+            # Perception
             frame = self.camera.get_frame()
-
-            small_rgb = None
-            mask = None
-
             if frame is not None:
                 # Downscale by striding
                 scale_y = frame.shape[0] / IMAGE_H
@@ -382,9 +384,8 @@ class LineFollowerDiscrete:
                     pad_x = IMAGE_W - small.shape[1]
                     small = np.pad(small, ((0, max(0, pad_y)), (0, max(0, pad_x)), (0,0)), mode='edge')
                     small = small[:IMAGE_H, :IMAGE_W, :]
-                small_rgb = small
 
-                gray = to_gray_norm(small_rgb)
+                gray = to_gray_norm(small)
                 y0, y1 = roi_slice(IMAGE_H, ROI_FRACTION)
                 roi = gray[y0:y1, :]
                 mask = binary_threshold(roi, BIN_THRESH, invert=not LINE_IS_DARK)
@@ -404,19 +405,22 @@ class LineFollowerDiscrete:
             spwm, tpwm = self.compute_and_drive_discrete(tnow)
 
             # Recording
-            if self.recording and small_rgb is not None:
-                self.save_sample(small_rgb, spwm, tpwm, tnow)
+            if self.recording and frame is not None:
+                self.save_sample(frame, spwm, tpwm, tnow)
 
             # Pace loop
             next_t += self.ctrl_period
             delay = next_t - time.time()
             if delay > 0:
                 time.sleep(delay)
+
+            # Perf counters
+            self.ctrl_count += 1
             loops += 1
 
         self.running = False
 
-    # -------------------------- Discrete controller --------------------------
+    # ------------- Discrete controller -------------
     def compute_and_drive_discrete(self, tnow):
         cfg = self.cfg
         left_pwm = cfg["STEERING_LEFT_PWM"]
@@ -429,8 +433,7 @@ class LineFollowerDiscrete:
         if (tnow - self.last_line_time) > NO_LINE_TIMEOUT and self.auto_mode:
             spwm = self.motors.set_pwm_raw(self.motors.channel_steer, center_pwm)
             tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, stop_pwm)
-            if int(time.time() * 10) % 10 == 0:
-                print("[Out][AUTO] No line -> NEUTRAL", flush=True)
+            self.last_decision = "NO_LINE"
             return spwm, tpwm
 
         if not self.auto_mode:
@@ -440,11 +443,13 @@ class LineFollowerDiscrete:
 
         # Hysteresis-based decision
         decision = self.last_decision
-        if decision == "STRAIGHT":
+        if decision in ("STRAIGHT", "NO_LINE"):
             if err < -DEAD_BAND_ON:
                 decision = "LEFT"
             elif err > DEAD_BAND_ON:
                 decision = "RIGHT"
+            else:
+                decision = "STRAIGHT"
         elif decision == "LEFT":
             if -DEAD_BAND_OFF <= err <= DEAD_BAND_OFF:
                 decision = "STRAIGHT"
@@ -468,20 +473,15 @@ class LineFollowerDiscrete:
         # Throttle PWM with optional curve slowdown
         throttle_pwm = fwd_pwm
         if USE_CURVE_SLOWDOWN:
-            # curvature is roughly slope of centroid across rows; scale heuristic
             curve_mag = min(1.0, abs(self.last_curvature) * 50.0)
             k = 1.0 - CURVE_SLOWDOWN_GAIN * curve_mag
             throttle_pwm = int(np.interp(k, [0.0, 1.0], [stop_pwm, fwd_pwm]))
 
         spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
         tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, throttle_pwm)
-
-        if int(time.time() * 10) % 10 == 0:  # ~10 Hz log
-            print(f"[Out][AUTO] err {err:+.3f} curv {self.last_curvature:+.4f} | {decision:8s} | steerPWM {spwm} | throttlePWM {tpwm}", flush=True)
-
         return spwm, tpwm
 
-    # -------------------------- Recording --------------------------
+    # ------------- Recording -------------
     def _start_recording(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.data_dir = os.path.join(DATA_ROOT, f"lfd_{ts}")
@@ -501,18 +501,93 @@ class LineFollowerDiscrete:
             w.writerow([self.frame_id, f"{tnow:.6f}", f"{steer_pwm:d}", f"{throttle_pwm:d}"])
         self.frame_id += 1
 
+    # ------------- Dashboard -------------
+    def draw_status(self, force=False):
+        # Basic layout
+        try:
+            self.stdscr.erase()
+            rows, cols = self.stdscr.getmaxyx()
+            # Header
+            self.stdscr.addstr(0, 0, "Meta Dot PiCar - Discrete Line Follower [curses dashboard]".ljust(cols-1))
+
+            # Mode/State
+            self.stdscr.addstr(2, 0, f"Mode         : {'AUTO' if self.auto_mode else 'MANUAL'}")
+            self.stdscr.addstr(3, 0, f"Recording    : {'ON' if self.recording else 'OFF'}")
+            self.stdscr.addstr(4, 0, f"Decision     : {self.last_decision}")
+            self.stdscr.addstr(5, 0, f"Error (norm) : {self.last_center_err:+.3f}")
+            self.stdscr.addstr(6, 0, f"Curvature    : {self.last_curvature:+.4f}")
+
+            # PWM outputs (manual shown in MANUAL, last applied in AUTO)
+            if self.auto_mode:
+                # We cannot easily fetch last set values back; show targets instead
+                self.stdscr.addstr(8, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
+            else:
+                self.stdscr.addstr(8, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
+
+            # ROI/Thresholds
+            self.stdscr.addstr(10, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
+            self.stdscr.addstr(11, 0, f"Deadband ON/OFF: {DEAD_BAND_ON:.2f}/{DEAD_BAND_OFF:.2f}   No-line timeout: {NO_LINE_TIMEOUT:.1f}s")
+
+            # Perf (rough estimates)
+            now = time.time()
+            ctrl_fps = self.ctrl_count / max(1e-3, (now - self.ctrl_t0))
+            self.ctrl_count = 0
+            self.ctrl_t0 = now
+
+            self.stdscr.addstr(13, 0, f"Control loop target: {CONTROL_LOOP_HZ} Hz | est: {ctrl_fps:5.1f} Hz")
+            self.stdscr.addstr(14, 0, f"Camera target: {CAMERA_LOOP_HZ} Hz   | (Picamera2 internal)")
+
+            # Controls help
+            self.stdscr.addstr(16, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
+
+            # Message line
+            if self.msg:
+                self.stdscr.addstr(18, 0, f"Msg: {self.msg}".ljust(cols-1))
+
+            self.stdscr.refresh()
+        except curses.error:
+            # Ignore drawing errors if terminal too small
+            pass
+
+    def _target_steer_pwm_str(self):
+        left = self.cfg["STEERING_LEFT_PWM"]
+        right = self.cfg["STEERING_RIGHT_PWM"]
+        center = int(round((left + right) / 2))
+        if self.last_decision == "LEFT":
+            return f"{left}"
+        elif self.last_decision == "RIGHT":
+            return f"{right}"
+        elif self.last_decision == "NO_LINE":
+            return f"{center}"
+        else:
+            return f"{center}"
+
+    def _target_throttle_pwm_str(self):
+        fwd = self.cfg["THROTTLE_FORWARD_PWM"]
+        stop = self.cfg["THROTTLE_STOPPED_PWM"]
+        if self.last_decision == "NO_LINE":
+            return f"{stop}"
+        if not USE_CURVE_SLOWDOWN:
+            return f"{fwd}"
+        curve_mag = min(1.0, abs(self.last_curvature) * 50.0)
+        k = 1.0 - CURVE_SLOWDOWN_GAIN * curve_mag
+        tpwm = int(np.interp(k, [0.0, 1.0], [stop, fwd]))
+        return f"{tpwm}"
+
 # ------------------------------
-# Entry
+# Entry (curses wrapper)
 # ------------------------------
-def main():
-    lf = LineFollowerDiscrete(PWM_STEERING_THROTTLE)
+def main(stdscr):
+    lf = LineFollowerDiscrete(PWM_STEERING_THROTTLE, stdscr)
     try:
         lf.start()
     except KeyboardInterrupt:
-        print("\n[Main] Ctrl-C received; stopping...", flush=True)
+        lf.msg = "Ctrl-C received; stopping..."
+        lf.draw_status()
     finally:
         lf.stop()
-        print("[Main] Stopped cleanly.", flush=True)
+        # Ensure screen restored before exiting
+        time.sleep(0.05)
 
 if __name__ == "__main__":
-    main()
+    curses.wrapper(main)
