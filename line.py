@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# Meta Dot PiCar Line Follower (Discrete) with curses dashboard
+# Meta Dot PiCar Line Follower (Discrete) with curses dashboard + optional one-shot color calibration
 # - Discrete LEFT/STRAIGHT/RIGHT steering (fixed PWMs, hysteresis)
 # - Curses dashboard via stdscr.addstr()
-# - Keyboard inside curses: h manual, a auto, r record, space stop, c center, p print decision line, q quit
-# - Arrows/WASD for manual throttle/steer (when in manual)
+# - Optional color-mode detection with one-shot HSV calibration (press-calibrate at start)
+# - Keyboard: h manual, a auto, r record, space stop, c center, p status, arrows/WASD manual, q quit
 #
-# Run:
+# Run examples:
 #   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py --mode gray
+#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py --mode color --calibrate
 #
-# Tip: If your terminal becomes garbled after crash, run `reset`.
+# Tip: If your terminal becomes garbled after a crash, run `reset`.
 
 import os
 import sys
@@ -17,6 +19,8 @@ import csv
 import threading
 from datetime import datetime
 import curses
+import argparse
+import select
 
 import numpy as np
 
@@ -73,10 +77,17 @@ CAM_STREAM_H = 240
 
 DATA_ROOT = "data"
 
-# Line detection parameters
+# Line detection parameters (gray mode)
 LINE_IS_DARK = True         # True if the line is darker than the floor
 ROI_FRACTION = (0.55, 0.95) # Use bottom 40% of the image for line search
 BIN_THRESH = 0.45           # Threshold on normalized grayscale [0..1]
+
+# Color mode HSV thresholds (degrees/percent)
+# These can be overridden by calibration in color mode
+H_LO_DEG = 20.0
+H_HI_DEG = 40.0
+S_MIN = 70        # 0..100
+V_MIN = 35        # 0..100
 
 # ------------------------------
 # Utility: PCA9685 helper
@@ -176,7 +187,7 @@ class CameraWorker:
             return self.frame.copy()
 
 # ------------------------------
-# Line detection without OpenCV
+# Image helpers (gray and color)
 # ------------------------------
 def to_gray_norm(rgb):
     g = (0.299 * rgb[...,0] + 0.587 * rgb[...,1] + 0.114 * rgb[...,2]).astype(np.float32)
@@ -194,6 +205,100 @@ def roi_slice(h, roi_frac):
     y1 = max(y0 + 1, int(h * roi_frac[1]))
     return y0, y1
 
+def ensure_rgb(img):
+    # Input from Picamera2 is already RGB from XRGB8888 slicing, but keep function for clarity
+    return img
+
+def rgb_to_hsv_np(rgb):
+    # rgb uint8 -> hsv (H deg 0..360, S% 0..100, V% 0..100), vectorized
+    rgb = rgb.astype(np.float32) / 255.0
+    r, g, b = rgb[...,0], rgb[...,1], rgb[...,2]
+    cmax = np.max(rgb, axis=-1)
+    cmin = np.min(rgb, axis=-1)
+    delta = cmax - cmin + 1e-8
+
+    # Hue
+    h = np.zeros_like(cmax)
+    mask = delta > 1e-8
+    r_eq = (cmax == r) & mask
+    g_eq = (cmax == g) & mask
+    b_eq = (cmax == b) & mask
+    h[r_eq] = (60.0 * ((g[r_eq] - b[r_eq]) / delta[r_eq]) + 360.0) % 360.0
+    h[g_eq] = (60.0 * ((b[g_eq] - r[g_eq]) / delta[g_eq]) + 120.0) % 360.0
+    h[b_eq] = (60.0 * ((r[b_eq] - g[b_eq]) / delta[b_eq]) + 240.0) % 360.0
+
+    # Saturation
+    s = np.zeros_like(cmax)
+    s[mask] = (delta[mask] / cmax[mask]) * 100.0
+
+    # Value
+    v = cmax * 100.0
+    return h, s, v
+
+def estimate_hue_band_and_vmin(H, S, V, min_s_for_color=60, center_crop_frac=0.5,
+                               hue_margin_deg=8.0, v_lo_percentile=30, v_min_margin=5):
+    """
+    Estimate a hue band [h_lo,h_hi] and a minimal V threshold from a ROI sample.
+    - Focus on reasonably saturated pixels (S >= min_s_for_color)
+    - Use central crop to reduce background influence
+    - Expand band by hue_margin_deg
+    - V_min = max(v_lo_percentile percentile, current global setting minus margin)
+    Returns h_lo_deg, h_hi_deg, v_min_est
+    """
+    Hc = H.copy()
+    Sc = S.copy()
+    Vc = V.copy()
+    Hh, Hw = H.shape[0], H.shape[1] if H.ndim == 2 else H.shape
+    cy0 = int((1.0 - center_crop_frac)/2.0 * Hh)
+    cy1 = Hh - cy0
+    cx0 = int((1.0 - center_crop_frac)/2.0 * Hw)
+    cx1 = Hw - cx0
+    Hc = Hc[cy0:cy1, cx0:cx1]
+    Sc = Sc[cy0:cy1, cx0:cx1]
+    Vc = Vc[cy0:cy1, cx0:cx1]
+
+    mask = Sc >= float(min_s_for_color)
+    if np.count_nonzero(mask) < 20:
+        # Fallback: use all pixels if not enough saturated ones
+        mask = np.ones_like(Sc, dtype=bool)
+
+    # Robust stats
+    h_vals = Hc[mask].reshape(-1)
+    if h_vals.size == 0:
+        return 0.0, 360.0, 30  # very permissive fallback
+
+    h_med = float(np.median(h_vals))
+    # Compute circular low/high with margin
+    h_lo = (h_med - hue_margin_deg) % 360.0
+    h_hi = (h_med + hue_margin_deg) % 360.0
+
+    v_vals = Vc[mask].reshape(-1)
+    v_lo = float(np.percentile(v_vals, v_lo_percentile))
+    v_min_est = int(round(max(0.0, min(100.0, v_lo - v_min_margin))))
+    return h_lo, h_hi, v_min_est
+
+def hsv_band_mask(rgb, h_lo_deg, h_hi_deg, s_min, v_min):
+    """
+    Create binary mask for hue band (with wrap-around) and S,V minimums.
+    Inputs:
+      - rgb uint8 image
+      - h_lo_deg, h_hi_deg in [0,360)
+      - s_min, v_min in [0..100]
+    """
+    H, S, V = rgb_to_hsv_np(rgb)
+    s_ok = (S >= float(s_min))
+    v_ok = (V >= float(v_min))
+    if h_lo_deg <= h_hi_deg:
+        h_ok = (H >= h_lo_deg) & (H <= h_hi_deg)
+    else:
+        # wrap-around case (e.g., 350..10)
+        h_ok = (H >= h_lo_deg) | (H <= h_hi_deg)
+    m = (h_ok & s_ok & v_ok).astype(np.uint8)
+    return m
+
+# ------------------------------
+# Line center finder (mask -> center, curvature)
+# ------------------------------
 def find_line_center(mask):
     h, w = mask.shape
     ys = np.arange(h, dtype=np.float32)
@@ -229,15 +334,19 @@ def find_line_center(mask):
     return float(center_norm), float(curvature)
 
 # ------------------------------
-# Discrete line follower
+# Discrete line follower with curses UI and optional color calibration
 # ------------------------------
 class LineFollowerDiscrete:
-    def __init__(self, cfg, stdscr):
+    def __init__(self, cfg, stdscr, args):
         self.cfg = cfg
         self.stdscr = stdscr
+        self.args = args
+        self.mode = args.mode  # "gray" or "color"
+
         self.motors = MotorServoController(cfg)
         self.camera = CameraWorker(stream_w=CAM_STREAM_W, stream_h=CAM_STREAM_H,
                                    hflip=CAMERA_HFLIP, vflip=CAMERA_VFLIP)
+
         # State
         self.running = True
         self.auto_mode = True
@@ -258,9 +367,7 @@ class LineFollowerDiscrete:
 
         # Perf meters
         self.ctrl_count = 0
-        self.cam_count = 0
         self.ctrl_t0 = time.time()
-        self.cam_t0 = time.time()
 
         # Manual control
         self.manual_steer_pwm = self.motors.steering_center_pwm()
@@ -268,6 +375,12 @@ class LineFollowerDiscrete:
 
         # Message line
         self.msg = ""
+
+        # Color thresholds (may be calibrated)
+        self.h_lo_deg = H_LO_DEG
+        self.h_hi_deg = H_HI_DEG
+        self.s_min = S_MIN
+        self.v_min = V_MIN
 
     # ------------- Lifecycle -------------
     def start(self):
@@ -281,6 +394,10 @@ class LineFollowerDiscrete:
         self.stdscr.nodelay(True)  # non-blocking getch
         curses.curs_set(0)         # hide cursor
         self.draw_status(force=True)
+
+        # Optional one-shot calibration (only for color modes)
+        if self.args.calibrate and self.mode == "color":
+            self.run_one_shot_calibration()
 
         # Start control loop thread
         self.running = True
@@ -298,6 +415,51 @@ class LineFollowerDiscrete:
     def stop(self):
         self.running = False
 
+    # ------------- One-shot color calibration -------------
+    def run_one_shot_calibration(self):
+        # Use bottom ROI like runtime, ask user to place the colored line centered in ROI and press Enter
+        # We'll do a blocking loop here with curses temporarily switching to blocking input of Enter
+        try:
+            self.msg = "Calibration: place colored line in ROI, press Enter to sample..."
+            self.draw_status(force=True)
+
+            # Switch to blocking getch for Enter detection
+            self.stdscr.nodelay(False)
+            while True:
+                frame = self.camera.get_frame()
+                if frame is None:
+                    time.sleep(0.02)
+                    continue
+                Hfull = frame.shape[0]
+                y0 = int(Hfull * ROI_FRACTION[0])
+                # Show a simple textual hint of ROI (curses only)
+                self.msg = "Calibration: Press Enter to capture ROI..."
+                self.draw_status(force=True)
+                ch = self.stdscr.getch()
+                if ch in (curses.KEY_ENTER, 10, 13):
+                    # Sample ROI
+                    roi = frame[y0:Hfull, :, :]
+                    roi_rgb = ensure_rgb(roi)
+                    Hc, Sc, Vc = rgb_to_hsv_np(roi_rgb)
+                    h_lo_deg, h_hi_deg, v_min_est = estimate_hue_band_and_vmin(
+                        Hc, Sc, Vc,
+                        min_s_for_color=max(60, self.s_min - 10),
+                        center_crop_frac=0.5,
+                        hue_margin_deg=8.0,
+                        v_lo_percentile=30,
+                        v_min_margin=5
+                    )
+                    self.h_lo_deg = h_lo_deg
+                    self.h_hi_deg = h_hi_deg
+                    self.v_min = max(self.v_min, v_min_est)
+                    self.msg = f"Calibrated: h=[{self.h_lo_deg:.1f},{self.h_hi_deg:.1f}]°, s_min={self.s_min}, v_min={self.v_min}"
+                    self.draw_status(force=True)
+                    time.sleep(1.0)
+                    break
+        finally:
+            # Restore non-blocking
+            self.stdscr.nodelay(True)
+
     # ------------- Keyboard -------------
     def keyboard_loop(self):
         while self.running:
@@ -311,7 +473,6 @@ class LineFollowerDiscrete:
                 time.sleep(0.01)
                 continue
 
-            # Normalize codes
             if ch in (ord('q'), ord('Q')):
                 self.msg = "Quit requested"
                 self.stop()
@@ -338,29 +499,23 @@ class LineFollowerDiscrete:
                 self.msg = f"Decision={self.last_decision}, err={self.last_center_err:+.3f}"
 
             # Arrows / WASD
-            elif ch in (ord('w'), ord('W')):
+            elif ch in (ord('w'), ord('W'), curses.KEY_UP):
                 self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 10)
                 self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
-            elif ch in (ord('s'), ord('S')):
+            elif ch in (ord('s'), ord('S'), curses.KEY_DOWN):
                 self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 10)
                 self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
-            elif ch == curses.KEY_UP:
-                self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 10)
-                self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
-            elif ch == curses.KEY_DOWN:
-                self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 10)
-                self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
-            elif ch == curses.KEY_LEFT:
+            elif ch in (curses.KEY_LEFT,):
                 self.manual_steer_pwm = self.cfg["STEERING_LEFT_PWM"]
                 self.msg = f"Manual steer LEFT {self.manual_steer_pwm}"
-            elif ch == curses.KEY_RIGHT:
+            elif ch in (curses.KEY_RIGHT,):
                 self.manual_steer_pwm = self.cfg["STEERING_RIGHT_PWM"]
                 self.msg = f"Manual steer RIGHT {self.manual_steer_pwm}"
 
             # Apply manual immediately in manual mode
             if not self.auto_mode:
-                spwm = self.motors.set_pwm_raw(self.motors.channel_steer, self.manual_steer_pwm)
-                tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, self.manual_throttle_pwm)
+                _ = self.motors.set_pwm_raw(self.motors.channel_steer, self.manual_steer_pwm)
+                _ = self.motors.set_pwm_raw(self.motors.channel_throttle, self.manual_throttle_pwm)
 
             self.draw_status()
 
@@ -385,10 +540,16 @@ class LineFollowerDiscrete:
                     small = np.pad(small, ((0, max(0, pad_y)), (0, max(0, pad_x)), (0,0)), mode='edge')
                     small = small[:IMAGE_H, :IMAGE_W, :]
 
-                gray = to_gray_norm(small)
                 y0, y1 = roi_slice(IMAGE_H, ROI_FRACTION)
-                roi = gray[y0:y1, :]
-                mask = binary_threshold(roi, BIN_THRESH, invert=not LINE_IS_DARK)
+                roi_rgb = small[y0:y1, :, :]
+
+                if self.mode == "gray":
+                    gray = to_gray_norm(small)
+                    roi_gray = gray[y0:y1, :]
+                    mask = binary_threshold(roi_gray, BIN_THRESH, invert=not LINE_IS_DARK)
+                else:
+                    # color mode
+                    mask = hsv_band_mask(roi_rgb, self.h_lo_deg, self.h_hi_deg, self.s_min, self.v_min)
 
                 # Light 1D majority filter horizontally
                 pad = np.pad(mask, ((0,0),(1,1)), mode='edge')
@@ -503,50 +664,48 @@ class LineFollowerDiscrete:
 
     # ------------- Dashboard -------------
     def draw_status(self, force=False):
-        # Basic layout
         try:
             self.stdscr.erase()
             rows, cols = self.stdscr.getmaxyx()
             # Header
-            self.stdscr.addstr(0, 0, "Meta Dot PiCar - Discrete Line Follower [curses dashboard]".ljust(cols-1))
+            self.stdscr.addstr(0, 0, "Meta Dot PiCar - Discrete Line Follower [curses]".ljust(cols-1))
+            self.stdscr.addstr(1, 0, f"Mode={self.mode.upper()}  Calib h=[{self.h_lo_deg:.1f},{self.h_hi_deg:.1f}] s_min={self.s_min} v_min={self.v_min}".ljust(cols-1))
 
             # Mode/State
-            self.stdscr.addstr(2, 0, f"Mode         : {'AUTO' if self.auto_mode else 'MANUAL'}")
-            self.stdscr.addstr(3, 0, f"Recording    : {'ON' if self.recording else 'OFF'}")
-            self.stdscr.addstr(4, 0, f"Decision     : {self.last_decision}")
-            self.stdscr.addstr(5, 0, f"Error (norm) : {self.last_center_err:+.3f}")
-            self.stdscr.addstr(6, 0, f"Curvature    : {self.last_curvature:+.4f}")
+            self.stdscr.addstr(3, 0, f"Mode         : {'AUTO' if self.auto_mode else 'MANUAL'}")
+            self.stdscr.addstr(4, 0, f"Recording    : {'ON' if self.recording else 'OFF'}")
+            self.stdscr.addstr(5, 0, f"Decision     : {self.last_decision}")
+            self.stdscr.addstr(6, 0, f"Error (norm) : {self.last_center_err:+.3f}")
+            self.stdscr.addstr(7, 0, f"Curvature    : {self.last_curvature:+.4f}")
 
-            # PWM outputs (manual shown in MANUAL, last applied in AUTO)
+            # PWM outputs (manual shown in MANUAL, target in AUTO)
             if self.auto_mode:
-                # We cannot easily fetch last set values back; show targets instead
-                self.stdscr.addstr(8, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
+                self.stdscr.addstr(9, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
             else:
-                self.stdscr.addstr(8, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
+                self.stdscr.addstr(9, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
 
             # ROI/Thresholds
-            self.stdscr.addstr(10, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
-            self.stdscr.addstr(11, 0, f"Deadband ON/OFF: {DEAD_BAND_ON:.2f}/{DEAD_BAND_OFF:.2f}   No-line timeout: {NO_LINE_TIMEOUT:.1f}s")
+            self.stdscr.addstr(11, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
 
             # Perf (rough estimates)
             now = time.time()
             ctrl_fps = self.ctrl_count / max(1e-3, (now - self.ctrl_t0))
             self.ctrl_count = 0
             self.ctrl_t0 = now
-
             self.stdscr.addstr(13, 0, f"Control loop target: {CONTROL_LOOP_HZ} Hz | est: {ctrl_fps:5.1f} Hz")
             self.stdscr.addstr(14, 0, f"Camera target: {CAMERA_LOOP_HZ} Hz   | (Picamera2 internal)")
 
             # Controls help
             self.stdscr.addstr(16, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
+            if self.mode == "color":
+                self.stdscr.addstr(17, 0, "Tip: run with --calibrate to quickly set HSV band from ROI")
 
             # Message line
             if self.msg:
-                self.stdscr.addstr(18, 0, f"Msg: {self.msg}".ljust(cols-1))
+                self.stdscr.addstr(19, 0, f"Msg: {self.msg}".ljust(cols-1))
 
             self.stdscr.refresh()
         except curses.error:
-            # Ignore drawing errors if terminal too small
             pass
 
     def _target_steer_pwm_str(self):
@@ -557,8 +716,6 @@ class LineFollowerDiscrete:
             return f"{left}"
         elif self.last_decision == "RIGHT":
             return f"{right}"
-        elif self.last_decision == "NO_LINE":
-            return f"{center}"
         else:
             return f"{center}"
 
@@ -575,10 +732,19 @@ class LineFollowerDiscrete:
         return f"{tpwm}"
 
 # ------------------------------
-# Entry (curses wrapper)
+# Entry (argparse + curses wrapper)
 # ------------------------------
+def parse_args():
+    ap = argparse.ArgumentParser(description="Discrete line follower with curses and optional color calibration")
+    ap.add_argument("--mode", choices=["gray", "color"], default="gray",
+                    help="Detection mode: grayscale threshold (gray) or HSV hue band (color)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="One-shot calibration for color mode: sample hue band/Vmin from ROI on Enter")
+    return ap.parse_args()
+
 def main(stdscr):
-    lf = LineFollowerDiscrete(PWM_STEERING_THROTTLE, stdscr)
+    args = parse_args()
+    lf = LineFollowerDiscrete(PWM_STEERING_THROTTLE, stdscr, args)
     try:
         lf.start()
     except KeyboardInterrupt:
@@ -586,7 +752,6 @@ def main(stdscr):
         lf.draw_status()
     finally:
         lf.stop()
-        # Ensure screen restored before exiting
         time.sleep(0.05)
 
 if __name__ == "__main__":
