@@ -53,7 +53,7 @@ DEAD_BAND_ON = 0.14   # must exceed this to ENTER a turn
 DEAD_BAND_OFF = 0.08  # must fall within this to EXIT a turn (hysteresis)
 
 # Safety
-NO_LINE_TIMEOUT = 2.0        # seconds without detection -> trigger reverse-search
+NO_LINE_TIMEOUT = 0.5        # seconds without detection -> trigger reverse-search
 MAX_REVERSE_DURATION = 6.0   # seconds to keep reversing at most once NO_LINE triggers
 
 # Throttle/curve behavior
