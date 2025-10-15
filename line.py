@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Meta Dot PiCar Line Follower (Discrete) with curses dashboard + optional one-shot color calibration
+# Meta Dot PiCar Line Follower (Discrete) with curses dashboard + mandatory one-shot HSV calibration
 # - Discrete LEFT/STRAIGHT/RIGHT steering (fixed PWMs, hysteresis)
 # - Curses dashboard via stdscr.addstr()
-# - Optional color-mode detection with one-shot HSV calibration (press-calibrate at start)
+# - Color-mode detection with mandatory one-shot HSV calibration at start
 # - Keyboard: h manual, a auto, r record, space stop, c center, p status, arrows/WASD manual, q quit
 #
-# Run examples:
+# Run:
 #   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py
-#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py --mode gray
-#   LIBCAMERA_LOG_LEVELS=*:2 python3 -u line_follow_discrete_curses.py --mode color --calibrate
 #
 # Tip: If your terminal becomes garbled after a crash, run `reset`.
 
@@ -19,7 +17,6 @@ import csv
 import threading
 from datetime import datetime
 import curses
-import argparse
 import select
 
 import numpy as np
@@ -42,8 +39,8 @@ PWM_STEERING_THROTTLE = {
     "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",  # ensure 0x40
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 280,
-    "STEERING_RIGHT_PWM": 480,
-    "THROTTLE_FORWARD_PWM": 393,
+    "STEERING_RIGHT_PWM": 470,
+    "THROTTLE_FORWARD_PWM": 500,
     "THROTTLE_STOPPED_PWM": 370,
     "THROTTLE_REVERSE_PWM": 220,
 }
@@ -77,13 +74,12 @@ CAM_STREAM_H = 240
 
 DATA_ROOT = "data"
 
-# Line detection parameters (gray mode)
-LINE_IS_DARK = True         # True if the line is darker than the floor
-ROI_FRACTION = (0.55, 0.95) # Use bottom 40% of the image for line search
-BIN_THRESH = 0.45           # Threshold on normalized grayscale [0..1]
+# Line detection parameters (for gray; not used here since we enforce color+HSV)
+LINE_IS_DARK = True
+ROI_FRACTION = (0.55, 0.95)  # Use bottom 40% of the image for line search
+BIN_THRESH = 0.45
 
-# Color mode HSV thresholds (degrees/percent)
-# These can be overridden by calibration in color mode
+# Color mode HSV thresholds (degrees/percent) - will be calibrated
 H_LO_DEG = 20.0
 H_HI_DEG = 40.0
 S_MIN = 70        # 0..100
@@ -187,26 +183,10 @@ class CameraWorker:
             return self.frame.copy()
 
 # ------------------------------
-# Image helpers (gray and color)
+# Image helpers (HSV)
 # ------------------------------
-def to_gray_norm(rgb):
-    g = (0.299 * rgb[...,0] + 0.587 * rgb[...,1] + 0.114 * rgb[...,2]).astype(np.float32)
-    g /= 255.0
-    return g
-
-def binary_threshold(gray, thresh, invert=False):
-    if invert:
-        return (gray >= thresh).astype(np.uint8)
-    else:
-        return (gray <= thresh).astype(np.uint8)
-
-def roi_slice(h, roi_frac):
-    y0 = int(h * roi_frac[0])
-    y1 = max(y0 + 1, int(h * roi_frac[1]))
-    return y0, y1
-
 def ensure_rgb(img):
-    # Input from Picamera2 is already RGB from XRGB8888 slicing, but keep function for clarity
+    # Input from Picamera2 is already RGB from XRGB8888 slicing; kept for clarity
     return img
 
 def rgb_to_hsv_np(rgb):
@@ -217,7 +197,6 @@ def rgb_to_hsv_np(rgb):
     cmin = np.min(rgb, axis=-1)
     delta = cmax - cmin + 1e-8
 
-    # Hue
     h = np.zeros_like(cmax)
     mask = delta > 1e-8
     r_eq = (cmax == r) & mask
@@ -227,23 +206,16 @@ def rgb_to_hsv_np(rgb):
     h[g_eq] = (60.0 * ((b[g_eq] - r[g_eq]) / delta[g_eq]) + 120.0) % 360.0
     h[b_eq] = (60.0 * ((r[b_eq] - g[b_eq]) / delta[b_eq]) + 240.0) % 360.0
 
-    # Saturation
     s = np.zeros_like(cmax)
     s[mask] = (delta[mask] / cmax[mask]) * 100.0
 
-    # Value
     v = cmax * 100.0
     return h, s, v
 
 def estimate_hue_band_and_vmin(H, S, V, min_s_for_color=60, center_crop_frac=0.5,
                                hue_margin_deg=8.0, v_lo_percentile=30, v_min_margin=5):
     """
-    Estimate a hue band [h_lo,h_hi] and a minimal V threshold from a ROI sample.
-    - Focus on reasonably saturated pixels (S >= min_s_for_color)
-    - Use central crop to reduce background influence
-    - Expand band by hue_margin_deg
-    - V_min = max(v_lo_percentile percentile, current global setting minus margin)
-    Returns h_lo_deg, h_hi_deg, v_min_est
+    Estimate a hue band [h_lo,h_hi] and minimal V threshold from a ROI sample.
     """
     Hc = H.copy()
     Sc = S.copy()
@@ -259,16 +231,13 @@ def estimate_hue_band_and_vmin(H, S, V, min_s_for_color=60, center_crop_frac=0.5
 
     mask = Sc >= float(min_s_for_color)
     if np.count_nonzero(mask) < 20:
-        # Fallback: use all pixels if not enough saturated ones
         mask = np.ones_like(Sc, dtype=bool)
 
-    # Robust stats
     h_vals = Hc[mask].reshape(-1)
     if h_vals.size == 0:
-        return 0.0, 360.0, 30  # very permissive fallback
+        return 0.0, 360.0, 30  # permissive fallback
 
     h_med = float(np.median(h_vals))
-    # Compute circular low/high with margin
     h_lo = (h_med - hue_margin_deg) % 360.0
     h_hi = (h_med + hue_margin_deg) % 360.0
 
@@ -278,20 +247,12 @@ def estimate_hue_band_and_vmin(H, S, V, min_s_for_color=60, center_crop_frac=0.5
     return h_lo, h_hi, v_min_est
 
 def hsv_band_mask(rgb, h_lo_deg, h_hi_deg, s_min, v_min):
-    """
-    Create binary mask for hue band (with wrap-around) and S,V minimums.
-    Inputs:
-      - rgb uint8 image
-      - h_lo_deg, h_hi_deg in [0,360)
-      - s_min, v_min in [0..100]
-    """
     H, S, V = rgb_to_hsv_np(rgb)
     s_ok = (S >= float(s_min))
     v_ok = (V >= float(v_min))
     if h_lo_deg <= h_hi_deg:
         h_ok = (H >= h_lo_deg) & (H <= h_hi_deg)
     else:
-        # wrap-around case (e.g., 350..10)
         h_ok = (H >= h_lo_deg) | (H <= h_hi_deg)
     m = (h_ok & s_ok & v_ok).astype(np.uint8)
     return m
@@ -324,9 +285,8 @@ def find_line_center(mask):
         y_valid = ys[valid]
         c_valid = row_centroids[valid]
         y_mean = np.mean(y_valid)
-        c_mean = np.mean(c_valid)
         denom = np.sum((y_valid - y_mean)**2) + 1e-6
-        slope = np.sum((y_valid - y_mean) * (c_valid - c_mean)) / denom
+        slope = np.sum((y_valid - y_mean) * (c_valid - np.mean(c_valid))) / denom
         curvature = slope / (w + 1e-6)
     else:
         curvature = 0.0
@@ -334,14 +294,12 @@ def find_line_center(mask):
     return float(center_norm), float(curvature)
 
 # ------------------------------
-# Discrete line follower with curses UI and optional color calibration
+# Discrete line follower with curses UI and mandatory color calibration
 # ------------------------------
 class LineFollowerDiscrete:
-    def __init__(self, cfg, stdscr, args):
+    def __init__(self, cfg, stdscr):
         self.cfg = cfg
         self.stdscr = stdscr
-        self.args = args
-        self.mode = args.mode  # "gray" or "color"
 
         self.motors = MotorServoController(cfg)
         self.camera = CameraWorker(stream_w=CAM_STREAM_W, stream_h=CAM_STREAM_H,
@@ -376,7 +334,7 @@ class LineFollowerDiscrete:
         # Message line
         self.msg = ""
 
-        # Color thresholds (may be calibrated)
+        # HSV thresholds (will be set by calibration)
         self.h_lo_deg = H_LO_DEG
         self.h_hi_deg = H_HI_DEG
         self.s_min = S_MIN
@@ -385,7 +343,7 @@ class LineFollowerDiscrete:
     # ------------- Lifecycle -------------
     def start(self):
         self.camera.start()
-        # Wait for first frame (briefly)
+        # Wait for first frame
         t0 = time.time()
         while self.camera.get_frame() is None and time.time() - t0 < 2.0:
             time.sleep(0.02)
@@ -395,9 +353,8 @@ class LineFollowerDiscrete:
         curses.curs_set(0)         # hide cursor
         self.draw_status(force=True)
 
-        # Optional one-shot calibration (only for color modes)
-        if self.args.calibrate and self.mode == "color":
-            self.run_one_shot_calibration()
+        # Mandatory one-shot calibration (color, HSV)
+        self.run_one_shot_calibration()
 
         # Start control loop thread
         self.running = True
@@ -417,10 +374,9 @@ class LineFollowerDiscrete:
 
     # ------------- One-shot color calibration -------------
     def run_one_shot_calibration(self):
-        # Use bottom ROI like runtime, ask user to place the colored line centered in ROI and press Enter
-        # We'll do a blocking loop here with curses temporarily switching to blocking input of Enter
+        # Use bottom ROI like runtime; ask user to place the colored line in ROI and press Enter
         try:
-            self.msg = "Calibration: place colored line in ROI, press Enter to sample..."
+            self.msg = "Calibration required: place colored line in ROI, press Enter to sample..."
             self.draw_status(force=True)
 
             # Switch to blocking getch for Enter detection
@@ -433,7 +389,7 @@ class LineFollowerDiscrete:
                 Hfull = frame.shape[0]
                 y0 = int(Hfull * ROI_FRACTION[0])
                 # Show a simple textual hint of ROI (curses only)
-                self.msg = "Calibration: Press Enter to capture ROI..."
+                self.msg = "Calibration: align line in bottom ROI and press Enter..."
                 self.draw_status(force=True)
                 ch = self.stdscr.getch()
                 if ch in (curses.KEY_ENTER, 10, 13):
@@ -454,7 +410,7 @@ class LineFollowerDiscrete:
                     self.v_min = max(self.v_min, v_min_est)
                     self.msg = f"Calibrated: h=[{self.h_lo_deg:.1f},{self.h_hi_deg:.1f}]°, s_min={self.s_min}, v_min={self.v_min}"
                     self.draw_status(force=True)
-                    time.sleep(1.0)
+                    time.sleep(0.8)
                     break
         finally:
             # Restore non-blocking
@@ -505,10 +461,10 @@ class LineFollowerDiscrete:
             elif ch in (ord('s'), ord('S'), curses.KEY_DOWN):
                 self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 10)
                 self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
-            elif ch in (curses.KEY_LEFT,):
+            elif ch == curses.KEY_LEFT:
                 self.manual_steer_pwm = self.cfg["STEERING_LEFT_PWM"]
                 self.msg = f"Manual steer LEFT {self.manual_steer_pwm}"
-            elif ch in (curses.KEY_RIGHT,):
+            elif ch == curses.KEY_RIGHT:
                 self.manual_steer_pwm = self.cfg["STEERING_RIGHT_PWM"]
                 self.msg = f"Manual steer RIGHT {self.manual_steer_pwm}"
 
@@ -543,13 +499,8 @@ class LineFollowerDiscrete:
                 y0, y1 = roi_slice(IMAGE_H, ROI_FRACTION)
                 roi_rgb = small[y0:y1, :, :]
 
-                if self.mode == "gray":
-                    gray = to_gray_norm(small)
-                    roi_gray = gray[y0:y1, :]
-                    mask = binary_threshold(roi_gray, BIN_THRESH, invert=not LINE_IS_DARK)
-                else:
-                    # color mode
-                    mask = hsv_band_mask(roi_rgb, self.h_lo_deg, self.h_hi_deg, self.s_min, self.v_min)
+                # HSV color mask using calibrated thresholds
+                mask = hsv_band_mask(roi_rgb, self.h_lo_deg, self.h_hi_deg, self.s_min, self.v_min)
 
                 # Light 1D majority filter horizontally
                 pad = np.pad(mask, ((0,0),(1,1)), mode='edge')
@@ -668,8 +619,8 @@ class LineFollowerDiscrete:
             self.stdscr.erase()
             rows, cols = self.stdscr.getmaxyx()
             # Header
-            self.stdscr.addstr(0, 0, "Meta Dot PiCar - Discrete Line Follower [curses]".ljust(cols-1))
-            self.stdscr.addstr(1, 0, f"Mode={self.mode.upper()}  Calib h=[{self.h_lo_deg:.1f},{self.h_hi_deg:.1f}] s_min={self.s_min} v_min={self.v_min}".ljust(cols-1))
+            self.stdscr.addstr(0, 0, "Meta Dot PiCar - Discrete Line Follower [curses + HSV calib]".ljust(cols-1))
+            self.stdscr.addstr(1, 0, f"Calibrated HSV: h=[{self.h_lo_deg:.1f},{self.h_hi_deg:.1f}] s_min={self.s_min} v_min={self.v_min}".ljust(cols-1))
 
             # Mode/State
             self.stdscr.addstr(3, 0, f"Mode         : {'AUTO' if self.auto_mode else 'MANUAL'}")
@@ -684,8 +635,8 @@ class LineFollowerDiscrete:
             else:
                 self.stdscr.addstr(9, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
 
-            # ROI/Thresholds
-            self.stdscr.addstr(11, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
+            # ROI info
+            self.stdscr.addstr(11, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}")
 
             # Perf (rough estimates)
             now = time.time()
@@ -697,12 +648,10 @@ class LineFollowerDiscrete:
 
             # Controls help
             self.stdscr.addstr(16, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
-            if self.mode == "color":
-                self.stdscr.addstr(17, 0, "Tip: run with --calibrate to quickly set HSV band from ROI")
 
             # Message line
             if self.msg:
-                self.stdscr.addstr(19, 0, f"Msg: {self.msg}".ljust(cols-1))
+                self.stdscr.addstr(18, 0, f"Msg: {self.msg}".ljust(cols-1))
 
             self.stdscr.refresh()
         except curses.error:
@@ -732,19 +681,10 @@ class LineFollowerDiscrete:
         return f"{tpwm}"
 
 # ------------------------------
-# Entry (argparse + curses wrapper)
+# Entry (curses wrapper)
 # ------------------------------
-def parse_args():
-    ap = argparse.ArgumentParser(description="Discrete line follower with curses and optional color calibration")
-    ap.add_argument("--mode", choices=["gray", "color"], default="gray",
-                    help="Detection mode: grayscale threshold (gray) or HSV hue band (color)")
-    ap.add_argument("--calibrate", action="store_true",
-                    help="One-shot calibration for color mode: sample hue band/Vmin from ROI on Enter")
-    return ap.parse_args()
-
 def main(stdscr):
-    args = parse_args()
-    lf = LineFollowerDiscrete(PWM_STEERING_THROTTLE, stdscr, args)
+    lf = LineFollowerDiscrete(PWM_STEERING_THROTTLE, stdscr)
     try:
         lf.start()
     except KeyboardInterrupt:
