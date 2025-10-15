@@ -45,7 +45,7 @@ PWM_STEERING_THROTTLE = {
     "STEERING_RIGHT_PWM": 480,
     "THROTTLE_FORWARD_PWM": 390,
     "THROTTLE_STOPPED_PWM": 370,
-    "THROTTLE_REVERSE_PWM": 220,
+    "THROTTLE_REVERSE_PWM": 340,  # updated per request
 }
 
 # Discrete decision thresholds (normalized error in [-1,1])
@@ -53,7 +53,8 @@ DEAD_BAND_ON = 0.14   # must exceed this to ENTER a turn
 DEAD_BAND_OFF = 0.08  # must fall within this to EXIT a turn (hysteresis)
 
 # Safety
-NO_LINE_TIMEOUT = 1.0  # seconds without detection -> neutral throttle
+NO_LINE_TIMEOUT = 1.0        # seconds without detection -> trigger reverse-search
+MAX_REVERSE_DURATION = 2.0   # seconds to keep reversing at most once NO_LINE triggers
 
 # Throttle/curve behavior
 USE_CURVE_SLOWDOWN = True
@@ -79,8 +80,8 @@ DATA_ROOT = "data"
 
 # Line detection parameters (gray mode)
 LINE_IS_DARK = False         # True if the line is darker than the floor
-ROI_FRACTION = (0.55, 0.95) # Use bottom 40% of the image for line search
-BIN_THRESH = 0.45           # Threshold on normalized grayscale [0..1]
+ROI_FRACTION = (0.55, 0.95)  # Use bottom 40% of the image for line search
+BIN_THRESH = 0.45            # Threshold on normalized grayscale [0..1]
 
 # Color mode HSV thresholds (degrees/percent)
 # These can be overridden by calibration in color mode
@@ -382,6 +383,9 @@ class LineFollowerDiscrete:
         self.s_min = S_MIN
         self.v_min = V_MIN
 
+        # Reverse search state
+        self.no_line_start_time = None
+
     # ------------- Lifecycle -------------
     def start(self):
         self.camera.start()
@@ -418,7 +422,6 @@ class LineFollowerDiscrete:
     # ------------- One-shot color calibration -------------
     def run_one_shot_calibration(self):
         # Use bottom ROI like runtime, ask user to place the colored line centered in ROI and press Enter
-        # We'll do a blocking loop here with curses temporarily switching to blocking input of Enter
         try:
             self.msg = "Calibration: place colored line in ROI, press Enter to sample..."
             self.draw_status(force=True)
@@ -432,12 +435,10 @@ class LineFollowerDiscrete:
                     continue
                 Hfull = frame.shape[0]
                 y0 = int(Hfull * ROI_FRACTION[0])
-                # Show a simple textual hint of ROI (curses only)
                 self.msg = "Calibration: Press Enter to capture ROI..."
                 self.draw_status(force=True)
                 ch = self.stdscr.getch()
                 if ch in (curses.KEY_ENTER, 10, 13):
-                    # Sample ROI
                     roi = frame[y0:Hfull, :, :]
                     roi_rgb = ensure_rgb(roi)
                     Hc, Sc, Vc = rgb_to_hsv_np(roi_rgb)
@@ -457,7 +458,6 @@ class LineFollowerDiscrete:
                     time.sleep(1.0)
                     break
         finally:
-            # Restore non-blocking
             self.stdscr.nodelay(True)
 
     # ------------- Keyboard -------------
@@ -465,7 +465,6 @@ class LineFollowerDiscrete:
         while self.running:
             ch = self.stdscr.getch()
             if ch == -1:
-                # update status at STATUS_HZ
                 now = time.time()
                 if now >= self.next_status_t:
                     self.draw_status()
@@ -497,8 +496,6 @@ class LineFollowerDiscrete:
                 self.msg = f"Center steer -> {self.manual_steer_pwm}"
             elif ch in (ord('p'), ord('P')):
                 self.msg = f"Decision={self.last_decision}, err={self.last_center_err:+.3f}"
-
-            # Arrows / WASD
             elif ch in (ord('w'), ord('W'), curses.KEY_UP):
                 self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 10)
                 self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
@@ -512,7 +509,6 @@ class LineFollowerDiscrete:
                 self.manual_steer_pwm = self.cfg["STEERING_RIGHT_PWM"]
                 self.msg = f"Manual steer RIGHT {self.manual_steer_pwm}"
 
-            # Apply manual immediately in manual mode
             if not self.auto_mode:
                 _ = self.motors.set_pwm_raw(self.motors.channel_steer, self.manual_steer_pwm)
                 _ = self.motors.set_pwm_raw(self.motors.channel_throttle, self.manual_throttle_pwm)
@@ -548,7 +544,6 @@ class LineFollowerDiscrete:
                     roi_gray = gray[y0:y1, :]
                     mask = binary_threshold(roi_gray, BIN_THRESH, invert=not LINE_IS_DARK)
                 else:
-                    # color mode
                     mask = hsv_band_mask(roi_rgb, self.h_lo_deg, self.h_hi_deg, self.s_min, self.v_min)
 
                 # Light 1D majority filter horizontally
@@ -561,6 +556,8 @@ class LineFollowerDiscrete:
                     self.last_line_time = tnow
                     self.last_center_err = center_norm
                     self.last_curvature = curvature
+                    # If we were in reverse search, clear its timer after reacquiring
+                    self.no_line_start_time = None
 
             # Drive
             spwm, tpwm = self.compute_and_drive_discrete(tnow)
@@ -589,13 +586,42 @@ class LineFollowerDiscrete:
         center_pwm = int(round((left_pwm + right_pwm) / 2))
         fwd_pwm = cfg["THROTTLE_FORWARD_PWM"]
         stop_pwm = cfg["THROTTLE_STOPPED_PWM"]
+        reverse_pwm = cfg["THROTTLE_REVERSE_PWM"]
 
-        # Safety: no line recently
-        if (tnow - self.last_line_time) > NO_LINE_TIMEOUT and self.auto_mode:
-            spwm = self.motors.set_pwm_raw(self.motors.channel_steer, center_pwm)
-            tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, stop_pwm)
-            self.last_decision = "NO_LINE"
-            return spwm, tpwm
+        # Determine if we should enter or remain in NO_LINE reverse-search
+        time_since_line = tnow - self.last_line_time
+        in_no_line = (time_since_line > NO_LINE_TIMEOUT) and self.auto_mode
+
+        if in_no_line:
+            # Start reverse window if just entered NO_LINE
+            if self.no_line_start_time is None:
+                self.no_line_start_time = tnow
+                self.msg = "Line lost -> reversing to re-acquire"
+
+            elapsed_rev = tnow - self.no_line_start_time
+
+            if elapsed_rev <= MAX_REVERSE_DURATION:
+                # Bias steering to last decision direction to help re-acquire
+                if self.last_decision == "LEFT":
+                    steer_pwm = left_pwm
+                elif self.last_decision == "RIGHT":
+                    steer_pwm = right_pwm
+                else:
+                    steer_pwm = center_pwm
+                spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
+                tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, reverse_pwm)
+                self.last_decision = "NO_LINE"
+                return spwm, tpwm
+            else:
+                # Reverse window exceeded: stop as a safety fallback
+                spwm = self.motors.set_pwm_raw(self.motors.channel_steer, center_pwm)
+                tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, stop_pwm)
+                self.last_decision = "NO_LINE"
+                self.msg = "Reverse timeout -> stopped; waiting for line"
+                return spwm, tpwm
+
+        # Not in NO_LINE state; ensure timer cleared
+        self.no_line_start_time = None
 
         if not self.auto_mode:
             return 0, 0
@@ -723,7 +749,11 @@ class LineFollowerDiscrete:
         fwd = self.cfg["THROTTLE_FORWARD_PWM"]
         stop = self.cfg["THROTTLE_STOPPED_PWM"]
         if self.last_decision == "NO_LINE":
-            return f"{stop}"
+            # Show what we're actually doing in NO_LINE: reverse or stop (handled in compute)
+            if self.no_line_start_time is not None:
+                return f"{self.cfg['THROTTLE_REVERSE_PWM']}"
+            else:
+                return f"{stop}"
         if not USE_CURVE_SLOWDOWN:
             return f"{fwd}"
         curve_mag = min(1.0, abs(self.last_curvature) * 50.0)
