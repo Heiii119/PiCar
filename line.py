@@ -45,7 +45,7 @@ PWM_STEERING_THROTTLE = {
     "STEERING_RIGHT_PWM": 480,
     "THROTTLE_FORWARD_PWM": 393,
     "THROTTLE_STOPPED_PWM": 370,
-    "THROTTLE_REVERSE_PWM": 300,  # updated per request
+    "THROTTLE_REVERSE_PWM": 330,  # updated per request
 }
 
 # Discrete decision thresholds (normalized error in [-1,1])
@@ -385,6 +385,8 @@ class LineFollowerDiscrete:
 
         # Reverse search state
         self.no_line_start_time = None
+        self.no_line_phase = "idle"           # "idle" | "neutral" | "reverse"
+        self.no_line_phase_start = None
 
     # ------------- Lifecycle -------------
     def start(self):
@@ -593,9 +595,11 @@ class LineFollowerDiscrete:
         in_no_line = (time_since_line > NO_LINE_TIMEOUT) and self.auto_mode
 
         if in_no_line:
-            # Start reverse window if just entered NO_LINE
+            # Initialize reverse window and phase
             if self.no_line_start_time is None:
                 self.no_line_start_time = tnow
+                self.no_line_phase = "neutral"
+                self.no_line_phase_start = tnow
                 self.msg = "Line lost -> reversing to re-acquire"
 
             elapsed_rev = tnow - self.no_line_start_time
@@ -608,12 +612,26 @@ class LineFollowerDiscrete:
                     steer_pwm = right_pwm
                 else:
                     steer_pwm = center_pwm
-                spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
-                tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, reverse_pwm)
+                
+                _ = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
+                
+                # Phase 1: brief neutral for ESCs that require brake-before-reverse
+                if self.no_line_phase == "neutral":
+                    _ = self.motors.set_pwm_raw(self.motors.channel_throttle, stop_pwm)
+                    if (tnow - self.no_line_phase_start) >= 0.25:  # 250 ms neutral
+                        self.no_line_phase = "reverse"
+                        self.no_line_phase_start = tnow
+                    self.last_decision = "NO_LINE"
+                    return steer_pwm, stop_pwm
+
+                # Phase 2: steady reverse
+                _ = self.motors.set_pwm_raw(self.motors.channel_throttle, reverse_pwm)
                 self.last_decision = "NO_LINE"
-                return spwm, tpwm
+                return steer_pwm, reverse_pwm
             else:
-                # Reverse window exceeded: stop as a safety fallback
+                # Timeout safety: stop if we couldn't re-acquire within the window
+                self.no_line_phase = "idle"
+                self.no_line_phase_start = None
                 spwm = self.motors.set_pwm_raw(self.motors.channel_steer, center_pwm)
                 tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, stop_pwm)
                 self.last_decision = "NO_LINE"
