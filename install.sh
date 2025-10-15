@@ -7,7 +7,10 @@
 # Adds minimal extras:
 #   python3-pip python3-smbus python3-smbus2 qtwayland5 git
 #   rpicam-apps (or libcamera-apps as fallback) for rpicam-hello
-# Creates venv at ~/tt02-venv and installs OpenCV + Adafruit PCA9685 only inside it
+# Creates venv at ~/tt02-venv 
+# - Creates venv with --system-site-packages so apt site-packages (picamera2) are visible
+# - Installs OpenCV + PCA9685 libs only inside the venv
+# - Ensures libcamera/rpicam-hello present, enables I2C, and suggests KMS camera stack
 
 set -u
 set -o pipefail
@@ -24,15 +27,14 @@ apt_install_one() {
   if ! sudo apt-get install -y "$pkg"; then
     echo "WARNING: Failed to install $pkg"
     FAILED_PKGS+=("$pkg")
-    return 0
   fi
 }
 
 disable_coral_repos() {
   echo "==> Checking for Coral/EdgeTPU APT sources to disable..."
   local changed=0
+  shopt -s nullglob
   for f in /etc/apt/sources.list.d/*coral*.list /etc/apt/sources.list.d/*edgetpu*.list /etc/apt/sources.list.d/*cloud*.list; do
-    [[ -f "$f" ]] || continue
     if grep -Ei 'coral|edgetpu|packages\.cloud\.google\.com' "$f" >/dev/null 2>&1; then
       echo "   - Disabling $f (commenting out deb lines)"
       if [[ ! -f "${f}.bak" ]]; then
@@ -44,6 +46,7 @@ disable_coral_repos() {
       fi
     fi
   done
+  shopt -u nullglob
   if (( changed == 0 )); then
     echo "   No Coral/EdgeTPU sources found (nothing to disable)."
   fi
@@ -58,6 +61,11 @@ uname -a || true
 cat /etc/os-release || true
 echo
 
+# Basic sanity: require Bullseye or newer
+if ! grep -Eq 'bullseye|bookworm' /etc/os-release; then
+  echo "WARNING: This script expects Raspberry Pi OS Bullseye/Bookworm. Picamera2 apt packages may be unavailable."
+fi
+
 # Disable Coral/EdgeTPU sources if present
 disable_coral_repos
 
@@ -70,14 +78,21 @@ if ! sudo apt-get update; then
   fi
 fi
 
-# Core camera stack (force install to ensure ABI-aligned builds)
+# Upgrade core to ensure ABI alignment
+echo "==> Upgrading base system (recommended for libcamera alignment)..."
+sudo apt-get dist-upgrade -y || echo "NOTICE: dist-upgrade failed or was skipped."
+
+# Core camera stack
 apt_install_one python3-numpy
 apt_install_one python3-simplejpeg
 apt_install_one python3-picamera2
+apt_install_one libcamera-apps || true   # older name on some images
+apt_install_one rpicam-apps || true      # newer name replaces libcamera-apps
 
 # GUI support for Picamera2 preview (QT)
 apt_install_one python3-pyqt5
 apt_install_one qtwayland5
+apt_install_one python3-kms++ || true
 
 # I2C + utils
 apt_install_one i2c-tools
@@ -91,22 +106,21 @@ apt_install_one python3-pil
 apt_install_one python3-pip
 apt_install_one git
 
-# Venv support and full Python (headers etc.)
+# Venv support and build tools
 apt_install_one python3-venv
 apt_install_one python3-full
 apt_install_one build-essential
 apt_install_one libjpeg-dev
 
-# Camera apps for rpicam-hello (try new then old package name)
-apt_install_one rpicam-apps
-apt_install_one libcamera-apps
-
-# Enable I2C if possible
-echo "==> Enabling I2C (raspi-config if available)..."
+# Enable I2C and KMS camera stack if possible
+echo "==> Enabling I2C and KMS (raspi-config if available)..."
 if have_cmd raspi-config; then
   sudo raspi-config nonint do_i2c 0 || echo "NOTE: raspi-config I2C enable returned non-zero (continuing)."
+  # Ensure GL driver uses KMS (not FKMS/Legacy)
+  sudo raspi-config nonint do_gldriver KMS || echo "NOTE: Could not set KMS via raspi-config (continuing)."
+  REBOOT_NEEDED=1
 else
-  echo "NOTE: raspi-config not found; skipping automatic I2C enable."
+  echo "NOTE: raspi-config not found; skipping automatic I2C/KMS enable."
 fi
 
 # Add user to i2c group
@@ -127,27 +141,28 @@ if [[ ! -e /dev/i2c-1 ]]; then
   REBOOT_NEEDED=1
 fi
 
-# Create and populate a dedicated venv at ~/tt02-venv
-echo "==> Creating Python venv at ~/tt02-venv ..."
-python3 -m venv "$HOME/tt02-venv" || { echo "ERROR: Failed to create venv."; exit 1; }
+# Create and populate a venv that can see system site-packages (for picamera2 from apt)
+VENV_DIR="$HOME/tt02-venv"
+echo "==> Creating Python venv at $VENV_DIR (with system site packages) ..."
+python3 -m venv --system-site-packages "$VENV_DIR" || { echo "ERROR: Failed to create venv."; exit 1; }
 
 echo "==> Activating venv and installing packages inside it ..."
 # shellcheck disable=SC1090
-source "$HOME/tt02-venv/bin/activate"
+source "$VENV_DIR/bin/activate"
 
 # Upgrade tooling in venv
 python -m pip install --upgrade pip wheel setuptools || echo "WARNING: venv pip upgrade failed (continuing)."
 
 # Install OpenCV and PCA9685 only in the venv
-# Use headless OpenCV unless you specifically need GUI windows from cv2.imshow
 pip install --no-cache-dir opencv-python-headless || { echo "ERROR: Failed to install OpenCV in venv."; deactivate; exit 1; }
-
-# PCA9685 libs
 pip install --no-cache-dir adafruit-circuitpython-pca9685 adafruit-blinka Adafruit-PCA9685 || echo "WARNING: PCA9685 install in venv encountered an issue."
+
+# Optional: small helpers for console UIs
+pip install --no-cache-dir rich || true
 
 deactivate || true
 
-# Post-install verification (system Python, ABI alignment)
+# Post-install verification (system Python)
 echo "==> Verifying Picamera2 stack (system Python) ..."
 SYS_PY="$(command -v python3 || echo /usr/bin/python3)"
 echo "Using: $SYS_PY"
@@ -164,23 +179,36 @@ def try_import(name):
         return False
 ok_np = try_import("numpy")
 ok_sj = try_import("simplejpeg")
-if ok_np and ok_sj:
-    try:
-        from picamera2 import Picamera2, Preview  # noqa: F401
-        print("OK: import picamera2")
-    except Exception as e:
-        print(f"FAIL: import picamera2 -> {e}")
-else:
-    print("Skipping picamera2 import test because prerequisites failed.")
+ok_pc2 = try_import("picamera2")
 PY
 
-# PATH hint for user-site scripts (not strictly required now, but helpful if user-site tools get used)
+# Post-install verification (venv Python — should also see picamera2 thanks to --system-site-packages)
+echo "==> Verifying imports in venv ..."
+source "$VENV_DIR/bin/activate"
+python - <<'PY'
+import sys
+print("VENV Python:", sys.version)
+def try_import(name):
+    try:
+        __import__(name)
+        print(f"OK (venv): import {name}")
+        return True
+    except Exception as e:
+        print(f"FAIL (venv): import {name} -> {e}")
+        return False
+try_import("numpy")
+try_import("simplejpeg")
+try_import("picamera2")  # should succeed because venv sees system site-packages
+PY
+deactivate
+
+# PATH hint for user-site scripts
 USER_BASE=$(python3 -m site --user-base 2>/dev/null || echo "$HOME/.local")
 BIN_DIR="$USER_BASE/bin"
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo
   echo "NOTE: Your PATH may not include $BIN_DIR."
-  echo "Add this to your ~/.bashrc to use user-site tools:"
+  echo "Add this to your ~/.bashrc:"
   echo "  export PATH=\"$BIN_DIR:\$PATH\""
 fi
 
@@ -195,18 +223,22 @@ if (( ${#DISABLED_CORAL_FILES[@]} )); then
   echo
   echo "Temporarily disabled Coral/EdgeTPU APT entries in:"
   printf '  - %s\n' "${DISABLED_CORAL_FILES[@]}"
-  echo "Backups (if created) have .bak suffix. You can re-enable by restoring the file or uncommenting lines."
+  echo "Backups have .bak suffix. Re-enable by restoring or uncommenting."
 fi
 
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
   echo
-  echo "Reboot recommended so I2C and group changes take effect."
+  echo "Reboot recommended so I2C/KMS changes take effect."
 fi
 
-echo "Install done. Test the camera with: rpicam-hello -t 0"
-echo "Then run scripts"
+echo
+echo "Install done."
+echo "Test the camera: rpicam-hello -t 0  (on HDMI/local)"
+echo "Headless scripts should use Preview.DRM or Preview.NULL."
+echo
+echo "Run scripts:"
 echo "  - Activate venv: source ~/tt02-venv/bin/activate"
-echo "  - Run camera testing scripts, e.g.: python3 test_res_fps_qt.py"
-echo "  - Run camera inspector with preview: python3 camera_inspector.py --preview"
-echo "  - Run line follower with preview (example black line): python3 line_follower_console.py --mode black --preview"
-echo "  - Run keyboard control (ensure terminal focus): python3 tt02_keyboard_drive.py"
+echo "  - Example: python3 test_qtgl_preview.py"
+echo "If you still get ModuleNotFoundError for picamera2, run with system Python (no venv):"
+echo "  - deactivate"
+echo "  - python3 test_qtgl_preview.py"
