@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# line_follower_console.py — presets in code (no long CLI needed)
-# - Choose a simple preset in CONFIG: mode_choice in ["black", "yellow", "red", "blue"]
-# - Per-mode thresholds defined in LINE_COLOR_PRESETS
-# - You can still use --preview or --calibrate optionally
+# line_follower_console.py — presets + color-order toggle + invert steering
+# - Choose preset in CONFIG (no long CLI)
+# - Toggle COLOR_FLIP_BGR2RGB if your preview shows wrong colors (yellow looks blue)
+# - Toggle INVERT_STEER if turn directions are reversed
+# - Optional one-shot calibration still available with --calibrate (short)
 
 import os
 
@@ -29,17 +30,22 @@ except Exception:
     QApplication = None
 
 # ========== CONFIG: EDIT THESE LINES BEFORE RUNNING ==========
-# Choose line type (simple, no long CLI needed):
-# options: "black", "yellow", "red", "blue"
+# 1) Choose line type: "black", "yellow", "red", "blue"
 mode_choice = "yellow"
 
-# Global tuning (applies to all modes unless you override per-preset)
+# 2) If preview shows wrong colors (yellow appears blue), set this True
+#    This flips channel order from BGR->RGB consistently for both preview and HSV.
+COLOR_FLIP_BGR2RGB = True
+
+# 3) If the robot turns the wrong way (LEFT/RIGHT reversed), set this True
+INVERT_STEER = False
+
+# 4) Global tuning
 roi_height_default = 0.35    # bottom 35% of the frame
 deadband_default = 0.05      # normalized center error deadband
 min_coverage_default = 0.002 # ~0.2% of ROI pixels must match to accept
 
-# Per-color HSV presets (degrees for hue; 0..255 for S, V thresholds)
-# Tune to your lighting; these are good starting points
+# 5) Per-color HSV presets (degrees for hue; 0..255 for S, V thresholds)
 LINE_COLOR_PRESETS = {
     "black": {  # dark on light
         "type": "black",
@@ -53,20 +59,19 @@ LINE_COLOR_PRESETS = {
         "s_min": 80,
         "v_min": 70,
     },
-    "red": {  # handle red wrap-around (you can also calibrate)
+    "red": {  # red on bright floor (wrap-around)
         "type": "color",
-        # Split red band can be handled by in_hue_range wrap; pick one tight band
-        "h_lo": 350.0,  # using 0..360; function wraps
+        "h_lo": 350.0,  # wrap across 0°
         "h_hi": 10.0,
         "s_min": 90,
-        "v_min": 60,
+        "v_min": 80,
     },
-    "blue": {
+    "blue": {  # blue on bright floor
         "type": "color",
         "h_lo": 200.0,
         "h_hi": 240.0,
-        "s_min": 80,
-        "v_min": 60,
+        "s_min": 90,
+        "v_min": 80,
     },
 }
 # =============================================================
@@ -82,7 +87,20 @@ def configure(picam2, size, fps):
     )
     picam2.configure(cfg)
 
+def ensure_rgb(img):
+    """
+    Ensure the frame is in RGB order.
+    If COLOR_FLIP_BGR2RGB is True, flip channels from BGR->RGB.
+    Returns a contiguous copy suitable for QImage and PIL.
+    """
+    img = img[:, :, :3]
+    if COLOR_FLIP_BGR2RGB:
+        return img[:, :, ::-1].copy()
+    else:
+        return img.copy()
+
 def rgb_to_hsv_np(rgb):
+    # rgb must be true RGB order already; call ensure_rgb before passing here if needed.
     img = Image.fromarray(rgb, "RGB").convert("HSV")
     H, S, V = img.split()
     return np.array(H, dtype=np.uint8), np.array(S, dtype=np.uint8), np.array(V, dtype=np.uint8)
@@ -127,7 +145,7 @@ def pca_angle_deg(mask):
     if angle < -90: angle += 180
     return angle
 
-# Optional: self-calibration helpers (still usable via --calibrate)
+# Optional: self-calibration helpers (usable with --calibrate)
 def robust_percentiles(a, lo=5, hi=95):
     a = a.reshape(-1)
     return np.percentile(a, lo), np.percentile(a, hi)
@@ -151,7 +169,7 @@ def estimate_hue_band_and_vmin(H_u8, S_u8, V_u8,
     Sc = S_u8[y0:y0+ch, x0:x0+cw]
     Vc = V_u8[y0:y0+ch, x0:x0+cw]
 
-    s_lo, s_hi = robust_percentiles(Sc, 50, 95)
+    s_lo, _ = robust_percentiles(Sc, 50, 95)
     s_thresh = max(min_s_for_color, int(s_lo))
     candidates = Sc >= s_thresh
     if candidates.sum() < 100:
@@ -190,36 +208,57 @@ class PreviewWindow:
 
     def draw_and_show(self, frame_rgb, overlays=None):
         h, w, _ = frame_rgb.shape
-        qimg = QImage(frame_rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        rgb = ensure_rgb(frame_rgb)  # enforce correct channel order for preview
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
 
         if overlays:
             painter = QPainter(qimg)
-            pen = QPen(QColor("cyan")); pen.setWidth(2); painter.setPen(pen)
+
+            # center vertical line
+            pen = QPen(QColor("cyan"))
+            pen.setWidth(2)
+            painter.setPen(pen)
             painter.drawLine(w // 2, 0, w // 2, h)
-            y0 = overlays.get("roi_y0", 0); y1 = overlays.get("roi_y1", h)
-            pen.setColor(QColor("lime")); painter.setPen(pen)
+
+            # ROI rectangle
+            y0 = overlays.get("roi_y0", 0)
+            y1 = overlays.get("roi_y1", h)
+            pen.setColor(QColor("lime"))
+            painter.setPen(pen)
             painter.drawRect(0, y0, w - 1, y1 - y0 - 1)
-            cx = overlays.get("cx"); cy = overlays.get("cy")
+
+            # centroid dot (cx, cy are ROI-local; add y0)
+            cx = overlays.get("cx")
+            cy = overlays.get("cy")
             if cx is not None and cy is not None:
-                pen.setColor(QColor("red")); pen.setWidth(2); painter.setPen(pen)
-                r = 6; painter.drawEllipse(int(cx) - r, int(y0 + cy) - r, 2 * r, 2 * r)
+                pen.setColor(QColor("red"))
+                pen.setWidth(2)
+                painter.setPen(pen)
+                r = 6
+                painter.drawEllipse(int(cx) - r, int(y0 + cy) - r, 2 * r, 2 * r)
+
+            # angle segment
             ang = overlays.get("angle")
             if ang is not None and cx is not None and cy is not None:
-                length = min(w, h) // 8; rad = math.radians(ang)
+                length = min(w, h) // 8
+                rad = math.radians(ang)
                 x0 = int(cx - length * math.cos(rad) / 2)
                 y0_line = int(y0 + cy - length * math.sin(rad) / 2)
                 x1 = int(cx + length * math.cos(rad) / 2)
                 y1_line = int(y0 + cy + length * math.sin(rad) / 2)
-                pen.setColor(QColor("yellow")); pen.setWidth(3); painter.setPen(pen)
+                pen.setColor(QColor("yellow"))
+                pen.setWidth(3)
+                painter.setPen(pen)
                 painter.drawLine(x0, y0_line, x1, y1_line)
+
             painter.end()
 
         self.label.setPixmap(QPixmap.fromImage(qimg))
         self.app.processEvents()
 
 def main():
-    # We keep a minimal CLI: size, fps, preview, calibrate. No long threshold args needed.
-    ap = argparse.ArgumentParser(description="Line-following console analyzer with presets")
+    # Minimal CLI: size, fps, preview, calibrate. No long threshold args needed.
+    ap = argparse.ArgumentParser(description="Line-following console analyzer with presets and color fix toggles")
     ap.add_argument("--size", default="1280x720", help="Resolution WxH (e.g. 1280x720)")
     ap.add_argument("--fps", type=int, default=30, help="Target FPS")
     ap.add_argument("--preview", action="store_true", help="Show live camera preview with overlays (PyQt5)")
@@ -231,7 +270,6 @@ def main():
         raise ValueError(f"Unknown mode_choice '{mode_choice}'. Choose one of: {list(LINE_COLOR_PRESETS.keys())}")
     preset = LINE_COLOR_PRESETS[mode_choice]
 
-    # Derived detection params from preset and global defaults
     mode = "color" if preset["type"] == "color" else "black"
     roi_height = roi_height_default
     deadband = deadband_default
@@ -248,7 +286,8 @@ def main():
     # Preview window (optional)
     preview = None
     if args.preview:
-        preview = PreviewWindow(title=f"Line follower preview [{mode_choice}]")
+        fix_note = " (BGR->RGB fix ON)" if COLOR_FLIP_BGR2RGB else ""
+        preview = PreviewWindow(title=f"Line follower preview [{mode_choice}]{fix_note}")
         preview.app.processEvents()
         time.sleep(0.05)
 
@@ -271,7 +310,8 @@ def main():
                 _ = sys.stdin.readline()
                 break
         roi = frame[y0:H, :, :]
-        Hc, Sc, Vc = rgb_to_hsv_np(roi)
+        roi_rgb = ensure_rgb(roi)  # ensure correct channel order for HSV
+        Hc, Sc, Vc = rgb_to_hsv_np(roi_rgb)
         h_lo_deg, h_hi_deg, v_min_est = estimate_hue_band_and_vmin(
             Hc, Sc, Vc,
             min_s_for_color=max(60, s_min - 10),
@@ -293,7 +333,8 @@ def main():
                 frame = picam2.capture_array()
                 y0 = int(H * (1.0 - roi_height))
                 roi = frame[y0:H, :, :]
-                Hc, Sc, Vc = rgb_to_hsv_np(roi)
+                roi_rgb = ensure_rgb(roi)  # consistent order for HSV and preview coloring
+                Hc, Sc, Vc = rgb_to_hsv_np(roi_rgb)
                 if mode == "black":
                     mask = make_mask_black(Hc, Sc, Vc, s_max=s_max, v_max=v_max)
                 else:
@@ -330,7 +371,8 @@ def main():
             picam2.stop()
             return
 
-    print(f"Running preset '{mode_choice}' (mode={mode}). Ctrl+C to stop.")
+    print(f"Running preset '{mode_choice}' (mode={mode}). "
+          f"Color fix={'ON' if COLOR_FLIP_BGR2RGB else 'OFF'}, Invert steer={'ON' if INVERT_STEER else 'OFF'}. Ctrl+C to stop.")
     last_print = 0.0
     print_period = 1.0 / 10.0
 
@@ -341,7 +383,9 @@ def main():
             roi = frame[y0:H, :, :]
             hR, wR = roi.shape[0], roi.shape[1]
 
-            Hc, Sc, Vc = rgb_to_hsv_np(roi)
+            roi_rgb = ensure_rgb(roi)  # ensure consistent RGB for HSV
+            Hc, Sc, Vc = rgb_to_hsv_np(roi_rgb)
+
             if mode == "black":
                 mask = make_mask_black(Hc, Sc, Vc, s_max=s_max, v_max=v_max)
             else:
@@ -362,7 +406,11 @@ def main():
                     status = "line lost"
                     decision = "search"
                 else:
+                    # Normalized lateral error: e = (cx - wR/2) / (wR/2)
                     e_val = float((cx - (wR / 2)) / (wR / 2))
+                    # Optional steering inversion
+                    if INVERT_STEER:
+                        e_val = -e_val
                     if abs(e_val) <= deadband:
                         decision = "go straight"; status = "on line (centered)"
                     elif e_val < -deadband:
@@ -372,8 +420,10 @@ def main():
                     ang = pca_angle_deg(mask)
 
             if preview is not None:
-                preview.draw_and_show(frame, {"roi_y0": y0, "roi_y1": H, "cx": cx if coverage >= min_coverage else None,
-                                              "cy": cy if coverage >= min_coverage else None, "angle": ang})
+                preview.draw_and_show(frame, {"roi_y0": y0, "roi_y1": H,
+                                              "cx": cx if coverage >= min_coverage else None,
+                                              "cy": cy if coverage >= min_coverage else None,
+                                              "angle": ang})
 
             now = time.time()
             if now - last_print >= print_period:
