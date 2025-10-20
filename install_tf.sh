@@ -50,7 +50,13 @@ print("CPU devices:", tf.config.list_physical_devices('CPU'))
 PY
 
 log "Installing Adafruit libraries (Blinka, PCA9685, etc.) ..."
+# Bundle install (kept)
 pip install Adafruit-Blinka adafruit-circuitpython-busdevice adafruit-circuitpython-pca9685 adafruit-circuitpython-motor adafruit-circuitpython-servokit
+
+# Explicit installs requested (idempotent; ensures presence even if bundle line changes later)
+log "Installing requested PCA9685 libraries explicitly ..."
+pip install adafruit-circuitpython-pca9685
+pip install adafruit-circuitpython-busdevice
 
 log "Installing Picamera2 and libcamera tools ..."
 sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps libgpiod2
