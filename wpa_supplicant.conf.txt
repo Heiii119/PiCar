@@ -10,14 +10,14 @@ network={
 }
 
 network={
-    ssid="robocar_5G"
-    psk="abcd1234"
+    ssid="Meta-dot_5G"
+    psk="meta.dot@steam"
     priority=2
 }
 
 network={
-    ssid="donkey_5G"
-    psk="abcd1234"
+    ssid="NTGRBB8E_5G"
+    psk="22222222"
     priority=3
 }
 
