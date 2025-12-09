@@ -34,9 +34,22 @@ pip install tflite-runtime
 pip3 install --upgrade tflite-runtime
 ```
 
+### get open cv
+```bash
+sudo apt update
+sudo apt install -y python3-opencv
+```
+
 ##image regconition
 ```bash
 pip install pillow
+# backup (if any)
+[ -s labels.txt ] && cp labels.txt labels_backup.txt
+
+# download new labels
+wget \
+  https://github.com/leferrad/tensorflow-mobilenet/raw/refs/heads/master/imagenet/labels.txt \
+  -O labels.txt
 ```
 
 ### install tensorflow
