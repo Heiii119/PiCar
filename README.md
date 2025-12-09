@@ -34,6 +34,10 @@ pip install tflite-runtime
 pip3 install --upgrade tflite-runtime
 ```
 
+##image regconition
+```bash
+pip install pillow
+```
 
 ### install tensorflow
 for Python 3.7.3 on Raspbian Buster. 
