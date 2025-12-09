@@ -90,6 +90,10 @@ H_HI_DEG = 50.0
 S_MIN = 70        # 0..100
 V_MIN = 30        # 0..100
 
+# Traffic-light detection settings
+TRAFFIC_LIGHT_HOLD_TIME = 1.5  # seconds to hold last seen RED/GREEN after detection
+TRAFFIC_LIGHT_MIN_PIXELS = 80  # minimum coloured pixels in ROI to trust detection
+
 # ------------------------------
 # Utility: PCA9685 helper
 # ------------------------------
@@ -298,6 +302,50 @@ def hsv_band_mask(rgb, h_lo_deg, h_hi_deg, s_min, v_min):
     return m
 
 # ------------------------------
+# Traffic light detector (RED/GREEN) using HSV
+# ------------------------------
+def detect_traffic_light_state(frame_rgb):
+    """
+    Very simple colour-based detector for a traffic light in the top-centre region.
+    Returns: "RED", "GREEN", or "NONE".
+    """
+    h, w, _ = frame_rgb.shape
+
+    # Use a top-centre ROI where a traffic light is expected
+    y0 = int(0.05 * h)
+    y1 = int(0.45 * h)
+    x0 = int(0.3 * w)
+    x1 = int(0.7 * w)
+    roi = frame_rgb[y0:y1, x0:x1, :]
+
+    if roi.size == 0:
+        return "NONE"
+
+    H, S, V = rgb_to_hsv_np(roi)
+
+    # Basic validity mask (avoid dark/unsaturated pixels)
+    valid = (S >= 40.0) & (V >= 40.0)
+    if np.count_nonzero(valid) < TRAFFIC_LIGHT_MIN_PIXELS:
+        return "NONE"
+
+    # Red: H ~ [0, 20] or [340, 360)
+    red_mask = valid & ((H <= 20.0) | (H >= 340.0))
+
+    # Green: H ~ [80, 160]
+    green_mask = valid & (H >= 80.0) & (H <= 160.0)
+
+    red_count = int(np.count_nonzero(red_mask))
+    green_count = int(np.count_nonzero(green_mask))
+
+    if red_count < TRAFFIC_LIGHT_MIN_PIXELS and green_count < TRAFFIC_LIGHT_MIN_PIXELS:
+        return "NONE"
+
+    if red_count > green_count:
+        return "RED"
+    else:
+        return "GREEN"
+
+# ------------------------------
 # Line center finder (mask -> center, curvature)
 # ------------------------------
 def find_line_center(mask):
@@ -387,6 +435,11 @@ class LineFollowerDiscrete:
         self.no_line_start_time = None
         self.no_line_phase = "idle"           # "idle" | "neutral" | "reverse"
         self.no_line_phase_start = None
+
+        # Traffic light state
+        self.traffic_state = "NONE"           # "RED", "GREEN", or "NONE"
+        self.last_traffic_state = "NONE"
+        self.last_traffic_time = 0.0
 
     # ------------- Lifecycle -------------
     def start(self):
@@ -517,6 +570,23 @@ class LineFollowerDiscrete:
 
             self.draw_status()
 
+    # ------------- Traffic light state update -------------
+    def update_traffic_light_state(self, frame_rgb, tnow):
+        """
+        Update self.traffic_state based on current frame and time.
+        Uses simple colour detection + a hold time for stability.
+        """
+        state = detect_traffic_light_state(frame_rgb)
+        if state != "NONE":
+            self.last_traffic_state = state
+            self.last_traffic_time = tnow
+
+        # Hold last state for TRAFFIC_LIGHT_HOLD_TIME seconds
+        if (tnow - self.last_traffic_time) > TRAFFIC_LIGHT_HOLD_TIME:
+            self.traffic_state = "NONE"
+        else:
+            self.traffic_state = self.last_traffic_state
+
     # ------------- Control loop -------------
     def control_loop(self):
         next_t = time.time()
@@ -527,7 +597,10 @@ class LineFollowerDiscrete:
             # Perception
             frame = self.camera.get_frame()
             if frame is not None:
-                # Downscale by striding
+                # --- Traffic light detection (RED/GREEN/NONE) ---
+                self.update_traffic_light_state(frame, tnow)
+
+                # Downscale by striding for line detection
                 scale_y = frame.shape[0] / IMAGE_H
                 scale_x = frame.shape[1] / IMAGE_W
                 small = frame[::int(max(1, round(scale_y))), ::int(max(1, round(scale_x))), :]
@@ -684,6 +757,16 @@ class LineFollowerDiscrete:
             k = 1.0 - CURVE_SLOWDOWN_GAIN * curve_mag
             throttle_pwm = int(np.interp(k, [0.0, 1.0], [stop_pwm, fwd_pwm]))
 
+        # --- Traffic light override ---
+        # If a RED light is detected recently, force STOP (neutral throttle).
+        # If GREEN is detected, allow normal behaviour.
+        if self.traffic_state == "RED":
+            throttle_pwm = stop_pwm
+            self.msg = "RED light -> STOP"
+        elif self.traffic_state == "GREEN":
+            # Optional: only set message; throttle remains as computed
+            self.msg = "GREEN light -> GO"
+
         spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
         tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, throttle_pwm)
         return spwm, tpwm
@@ -723,6 +806,7 @@ class LineFollowerDiscrete:
             self.stdscr.addstr(5, 0, f"Decision     : {self.last_decision}")
             self.stdscr.addstr(6, 0, f"Error (norm) : {self.last_center_err:+.3f}")
             self.stdscr.addstr(7, 0, f"Curvature    : {self.last_curvature:+.4f}")
+            self.stdscr.addstr(8, 0, f"Traffic light: {self.traffic_state}")
 
             # PWM outputs (manual shown in MANUAL, target in AUTO)
             if self.auto_mode:
@@ -785,7 +869,7 @@ class LineFollowerDiscrete:
 # Entry (argparse + curses wrapper)
 # ------------------------------
 def parse_args():
-    ap = argparse.ArgumentParser(description="Discrete line follower with curses and optional color calibration")
+    ap = argparse.ArgumentParser(description="Discrete line follower with curses and optional color calibration + traffic light stop/go")
     ap.add_argument("--mode", choices=["gray", "color"], default="gray",
                     help="Detection mode: grayscale threshold (gray) or HSV hue band (color)")
     ap.add_argument("--calibrate", action="store_true",
