@@ -1,7 +1,7 @@
 import time
 import numpy as np
 from PIL import Image
-from picamera2 import PiCamera2
+from picamera2 import Picamera2
 from tflite_runtime.interpreter import Interpreter
 
 MODEL_PATH = "model.tflite"
