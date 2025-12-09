@@ -25,6 +25,15 @@ sudo i2cdetect -y 1
 pip install opencv-python
 ```
 
+### install tensorflowLite
+```bash
+python3 -m venv tflite-env
+source tflite-env/bin/activate
+pip install --upgrade pip
+pip install tflite-runtime
+pip3 install --upgrade tflite-runtime
+```
+
 
 ### install tensorflow
 for Python 3.7.3 on Raspbian Buster. 
