@@ -1,7 +1,7 @@
 import time
 import numpy as np
 from PIL import Image
-from picamera2 import Picamera2
+from picamera2 import Picamera2, Preview
 from tflite_runtime.interpreter import Interpreter
 import os
 
@@ -53,19 +53,23 @@ def classify_image(interpreter, top_k=3):
     return results
 
 def capture_image_from_camera(image_path, preview_seconds=2):
-    """Capture an image from the PiCamera2 and save it to image_path."""
+    """Show a live preview, then capture an image to image_path."""
     camera = Picamera2()
 
-    # Create a still configuration (full-resolution still image)
-    camera_config = camera.create_still_configuration()
-    camera.configure(camera_config)
+    # Use a preview configuration (lower res but fast, with display)
+    preview_config = camera.create_preview_configuration()
+    camera.configure(preview_config)
+
+    # Start preview window (uses Qt/GL on the Pi desktop)
+    camera.start_preview(Preview.QTGL)
 
     camera.start()
-    time.sleep(preview_seconds)  # Optional: let camera adjust exposure
+    time.sleep(preview_seconds)  # show live preview for N seconds
 
     camera.capture_file(image_path)
 
     camera.stop()
+    # Preview stops automatically when camera stops
     return image_path
 
 def main():
