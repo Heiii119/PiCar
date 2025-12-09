@@ -423,6 +423,11 @@ class LineFollowerDiscrete:
         self.last_curvature = 0.0
         self.last_decision = "STRAIGHT"
 
+        # Traffic light state
+        self.traffic_state = "NONE"           # "RED", "GREEN", or "NONE"
+        self.last_traffic_state = "NONE"
+        self.last_traffic_time = 0.0
+
         # Recording
         self.data_dir = None
         self.frame_id = 0
