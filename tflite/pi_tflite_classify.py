@@ -7,7 +7,7 @@ import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "model.tflite")
-LABELS_PATH = "labels.txt"
+LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 
 def load_labels(filename):
     """Load labels from a text file, one label per line."""
@@ -52,18 +52,21 @@ def classify_image(interpreter, top_k=3):
     results = [(i, float(output_data[i])) for i in top_k_indices]
     return results
 
-def capture_image_from_camera(filename="capture.jpg", preview_seconds=2):
-    """Capture a single image from PiCamera and save to a file."""
-    camera = PiCamera()
-    try:
-        camera.resolution = (640, 480)
-        camera.start_preview()
-        time.sleep(preview_seconds)  # let camera adjust exposure
-        camera.capture(filename)
-        camera.stop_preview()
-    finally:
-        camera.close()
-    return filename
+def capture_image_from_camera(image_path, preview_seconds=2):
+    """Capture an image from the PiCamera2 and save it to image_path."""
+    camera = Picamera2()
+
+    # Create a still configuration (full-resolution still image)
+    camera_config = camera.create_still_configuration()
+    camera.configure(camera_config)
+
+    camera.start()
+    time.sleep(preview_seconds)  # Optional: let camera adjust exposure
+
+    camera.capture_file(image_path)
+
+    camera.stop()
+    return image_path
 
 def main():
     print("Loading TFLite model...")
@@ -73,7 +76,7 @@ def main():
     labels = load_labels(LABELS_PATH)
     print(f"Loaded {len(labels)} labels.")
 
-    print("Capturing image from PiCamera...")
+    print("Capturing image from Picamera...")
     image_path = capture_image_from_camera("capture.jpg", preview_seconds=2)
     print(f"Image saved to {image_path}")
 
