@@ -308,51 +308,59 @@ def hsv_band_mask(rgb, h_lo_deg, h_hi_deg, s_min, v_min):
 # ------------------------------
 def detect_traffic_light_state(frame_rgb):
     """
-    Colour-based detector for a traffic light in the top-centre region.
+    Colour-based detector for a traffic light.
 
     Returns: "RED", "GREEN", or "NONE".
 
-    It only returns RED/GREEN if the corresponding colour covers at least
-    TRAFFIC_LIGHT_MIN_AREA_FRACTION of the *entire* camera frame.
+    Logic:
+      - Look at a large central ROI (most of the frame).
+      - Convert to HSV.
+      - Count red / green pixels.
+      - If red/green covers at least TRAFFIC_LIGHT_MIN_AREA_FRACTION of ROI area,
+        return RED / GREEN; otherwise return NONE.
     """
     h, w, _ = frame_rgb.shape
 
-    # Use a top-centre ROI where a traffic light is expected
+    # Use a LARGE central ROI so your light "in front of the camera" is included
     y0 = int(0.05 * h)
-    y1 = int(0.45 * h)
-    x0 = int(0.3 * w)
-    x1 = int(0.7 * w)
+    y1 = int(0.95 * h)
+    x0 = int(0.10 * w)
+    x1 = int(0.90 * w)
     roi = frame_rgb[y0:y1, x0:x1, :]
 
     if roi.size == 0:
         return "NONE"
 
+    roi_h, roi_w, _ = roi.shape
+    roi_pixels = roi_h * roi_w
+
     H, S, V = rgb_to_hsv_np(roi)
 
-    # Stricter validity mask to avoid background noise:
-    # - require reasonably high saturation and brightness
-    valid = (S >= 55.0) & (V >= 55.0)
-    if np.count_nonzero(valid) == 0:
+    # Valid: reasonably saturated and bright so background doesn't dominate
+    valid = (S >= 40.0) & (V >= 40.0)
+    if np.count_nonzero(valid) < 100:  # not enough valid coloured pixels
         return "NONE"
 
-    # Red: H ~ [0, 15] or [345, 360)
+    # Red: narrow-ish band around red
+    # [0, 15] or [345, 360)
     red_mask = valid & ((H <= 15.0) | (H >= 345.0))
 
-    # Green: H ~ [80, 150]
-    green_mask = valid & (H >= 80.0) & (H <= 150.0)
+    # Green: typical green range
+    # [70, 150]
+    green_mask = valid & (H >= 70.0) & (H <= 150.0)
 
     red_count = int(np.count_nonzero(red_mask))
     green_count = int(np.count_nonzero(green_mask))
 
-    # Compute area fraction relative to the *full* frame
-    frame_pixels = h * w
-    red_fraction   = red_count   / frame_pixels
-    green_fraction = green_count / frame_pixels
+    # FRACTION RELATIVE TO ROI (not whole frame)
+    red_fraction = red_count / roi_pixels
+    green_fraction = green_count / roi_pixels
 
-    # Require at least 1/4 of the screen (or whatever you set) to respond
+    # Require at least this fraction of the ROI to be red/green
     if red_fraction < TRAFFIC_LIGHT_MIN_AREA_FRACTION and green_fraction < TRAFFIC_LIGHT_MIN_AREA_FRACTION:
         return "NONE"
 
+    # Decide which colour dominates
     if red_fraction > green_fraction:
         return "RED"
     else:
