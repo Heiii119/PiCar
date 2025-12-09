@@ -91,10 +91,25 @@ S_MIN = 70        # 0..100
 V_MIN = 30        # 0..100
 
 # Traffic-light detection settings
-TRAFFIC_LIGHT_HOLD_TIME = 1.5  # seconds to hold last seen RED/GREEN after detection
-# Require that red/green covers at least this fraction of the ENTIRE frame area
-# Adjust this value if needed:
-TRAFFIC_LIGHT_MIN_AREA_FRACTION = 0.25  # e.g. 15% of the screen
+TRAFFIC_LIGHT_HOLD_TIME = 1.5    # seconds to hold last seen RED/GREEN after detection
+
+# Require that red/green covers at least this fraction of the *ROI* area
+# If 0.25 still feels too hard to trigger, lower to 0.20 or 0.15
+TRAFFIC_LIGHT_MIN_AREA_FRACTION = 0.20   # 20% of ROI area
+
+# HSV thresholds for traffic light detection
+# Hue ranges are in degrees [0, 360)
+RED_H_LO_1 = 0.0
+RED_H_HI_1 = 30.0      # wider red towards orange
+RED_H_LO_2 = 330.0
+RED_H_HI_2 = 360.0     # wrap-around red
+
+GREEN_H_LO = 60.0      # allow more yellowish greens
+GREEN_H_HI = 170.0     # allow bluish greens
+
+# Minimum saturation & value (brightness) to be considered "coloured"
+TL_S_MIN = 30.0        # lower = more sensitive, but more noise
+TL_V_MIN = 30.0
 
 # ------------------------------
 # Utility: PCA9685 helper
@@ -306,65 +321,26 @@ def hsv_band_mask(rgb, h_lo_deg, h_hi_deg, s_min, v_min):
 # ------------------------------
 # Traffic light detector (RED/GREEN) using HSV
 # ------------------------------
-def detect_traffic_light_state(frame_rgb):
-    """
-    Colour-based detector for a traffic light.
+# Traffic-light detection settings
+TRAFFIC_LIGHT_HOLD_TIME = 1.5    # seconds to hold last seen RED/GREEN after detection
 
-    Returns: "RED", "GREEN", or "NONE".
+# Require that red/green covers at least this fraction of the *ROI* area
+# If 0.25 still feels too hard to trigger, lower to 0.20 or 0.15
+TRAFFIC_LIGHT_MIN_AREA_FRACTION = 0.20   # 20% of ROI area
 
-    Logic:
-      - Look at a large central ROI (most of the frame).
-      - Convert to HSV.
-      - Count red / green pixels.
-      - If red/green covers at least TRAFFIC_LIGHT_MIN_AREA_FRACTION of ROI area,
-        return RED / GREEN; otherwise return NONE.
-    """
-    h, w, _ = frame_rgb.shape
+# HSV thresholds for traffic light detection
+# Hue ranges are in degrees [0, 360)
+RED_H_LO_1 = 0.0
+RED_H_HI_1 = 30.0      # wider red towards orange
+RED_H_LO_2 = 330.0
+RED_H_HI_2 = 360.0     # wrap-around red
 
-    # Use a LARGE central ROI so your light "in front of the camera" is included
-    y0 = int(0.05 * h)
-    y1 = int(0.95 * h)
-    x0 = int(0.10 * w)
-    x1 = int(0.90 * w)
-    roi = frame_rgb[y0:y1, x0:x1, :]
+GREEN_H_LO = 60.0      # allow more yellowish greens
+GREEN_H_HI = 170.0     # allow bluish greens
 
-    if roi.size == 0:
-        return "NONE"
-
-    roi_h, roi_w, _ = roi.shape
-    roi_pixels = roi_h * roi_w
-
-    H, S, V = rgb_to_hsv_np(roi)
-
-    # Valid: reasonably saturated and bright so background doesn't dominate
-    valid = (S >= 40.0) & (V >= 40.0)
-    if np.count_nonzero(valid) < 100:  # not enough valid coloured pixels
-        return "NONE"
-
-    # Red: narrow-ish band around red
-    # [0, 15] or [345, 360)
-    red_mask = valid & ((H <= 15.0) | (H >= 345.0))
-
-    # Green: typical green range
-    # [70, 150]
-    green_mask = valid & (H >= 70.0) & (H <= 150.0)
-
-    red_count = int(np.count_nonzero(red_mask))
-    green_count = int(np.count_nonzero(green_mask))
-
-    # FRACTION RELATIVE TO ROI (not whole frame)
-    red_fraction = red_count / roi_pixels
-    green_fraction = green_count / roi_pixels
-
-    # Require at least this fraction of the ROI to be red/green
-    if red_fraction < TRAFFIC_LIGHT_MIN_AREA_FRACTION and green_fraction < TRAFFIC_LIGHT_MIN_AREA_FRACTION:
-        return "NONE"
-
-    # Decide which colour dominates
-    if red_fraction > green_fraction:
-        return "RED"
-    else:
-        return "GREEN"
+# Minimum saturation & value (brightness) to be considered "coloured"
+TL_S_MIN = 30.0        # lower = more sensitive, but more noise
+TL_V_MIN = 30.0
 
 # ------------------------------
 # Line center finder (mask -> center, curvature)
