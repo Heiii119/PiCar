@@ -7,16 +7,17 @@ https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 ### setup virtual env
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3-venv python3-full
-python3 -m venv ~/tt02-venv
-source ~/tt02-venv/bin/activate
+sudo apt-get install -y python3-venv python3-full (optional)
+python3 -m venv tflite-env
+source tflite-env/bin/activate
 
 ```
-Later, to use again: ```source ~/tt02-venv/bin/activate```
+Later, to use again: ```source tflite-env/bin/activate```
 
 ### Configure I2C PCA9685 servo board (activate the venv first)
 ```bash
 pip3 install Adafruit-PCA9685
+pip3 install adafruit-circuitpython-pca9685
 sudo apt-get install -y i2c-tools
 sudo i2cdetect -y 1
 ```
@@ -52,7 +53,7 @@ wget \
   -O labels.txt
 ```
 
-### install tensorflow
+### install tensorflow (no need now)
 for Python 3.7.3 on Raspbian Buster. 
 - Use a fresh virtualenv Avoid the piwheels hash issue
 - Pins: numpy==1.19.5, h5py==2.10.0 (TF 2.4-friendly)
