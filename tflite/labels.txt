@@ -1,0 +1,7 @@
+background
+airplane
+bicycle
+bird
+car
+human
+...
