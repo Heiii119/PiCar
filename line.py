@@ -306,8 +306,12 @@ def hsv_band_mask(rgb, h_lo_deg, h_hi_deg, s_min, v_min):
 # ------------------------------
 def detect_traffic_light_state(frame_rgb):
     """
-    Very simple colour-based detector for a traffic light in the top-centre region.
+    Colour-based detector for a traffic light in the top-centre region.
+
     Returns: "RED", "GREEN", or "NONE".
+
+    It only returns RED/GREEN if the corresponding colour covers at least
+    TRAFFIC_LIGHT_MIN_AREA_FRACTION of the *entire* camera frame.
     """
     h, w, _ = frame_rgb.shape
 
@@ -323,24 +327,31 @@ def detect_traffic_light_state(frame_rgb):
 
     H, S, V = rgb_to_hsv_np(roi)
 
-    # Basic validity mask (avoid dark/unsaturated pixels)
-    valid = (S >= 40.0) & (V >= 40.0)
-    if np.count_nonzero(valid) < TRAFFIC_LIGHT_MIN_PIXELS:
+    # Stricter validity mask to avoid background noise:
+    # - require reasonably high saturation and brightness
+    valid = (S >= 55.0) & (V >= 55.0)
+    if np.count_nonzero(valid) == 0:
         return "NONE"
 
-    # Red: H ~ [0, 20] or [340, 360)
-    red_mask = valid & ((H <= 20.0) | (H >= 340.0))
+    # Red: H ~ [0, 15] or [345, 360)
+    red_mask = valid & ((H <= 15.0) | (H >= 345.0))
 
-    # Green: H ~ [80, 160]
-    green_mask = valid & (H >= 80.0) & (H <= 160.0)
+    # Green: H ~ [80, 150]
+    green_mask = valid & (H >= 80.0) & (H <= 150.0)
 
     red_count = int(np.count_nonzero(red_mask))
     green_count = int(np.count_nonzero(green_mask))
 
-    if red_count < TRAFFIC_LIGHT_MIN_PIXELS and green_count < TRAFFIC_LIGHT_MIN_PIXELS:
+    # Compute area fraction relative to the *full* frame
+    frame_pixels = h * w
+    red_fraction   = red_count   / frame_pixels
+    green_fraction = green_count / frame_pixels
+
+    # Require at least 1/4 of the screen (or whatever you set) to respond
+    if red_fraction < TRAFFIC_LIGHT_MIN_AREA_FRACTION and green_fraction < TRAFFIC_LIGHT_MIN_AREA_FRACTION:
         return "NONE"
 
-    if red_count > green_count:
+    if red_fraction > green_fraction:
         return "RED"
     else:
         return "GREEN"
