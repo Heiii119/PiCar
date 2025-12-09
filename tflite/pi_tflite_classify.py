@@ -3,8 +3,10 @@ import numpy as np
 from PIL import Image
 from picamera2 import Picamera2
 from tflite_runtime.interpreter import Interpreter
+import os
 
-MODEL_PATH = "model.tflite"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(SCRIPT_DIR, "model.tflite")
 LABELS_PATH = "labels.txt"
 
 def load_labels(filename):
