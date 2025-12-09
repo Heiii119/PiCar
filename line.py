@@ -92,7 +92,9 @@ V_MIN = 30        # 0..100
 
 # Traffic-light detection settings
 TRAFFIC_LIGHT_HOLD_TIME = 1.5  # seconds to hold last seen RED/GREEN after detection
-TRAFFIC_LIGHT_MIN_PIXELS = 80  # minimum coloured pixels in ROI to trust detection
+# Require that red/green covers at least this fraction of the ENTIRE frame area
+# Adjust this value if needed:
+TRAFFIC_LIGHT_MIN_AREA_FRACTION = 0.25  # e.g. 15% of the screen
 
 # ------------------------------
 # Utility: PCA9685 helper
