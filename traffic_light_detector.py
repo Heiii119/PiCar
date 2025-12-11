@@ -61,8 +61,8 @@ TL_S_MIN = 15.0         # in [0, 100]
 TL_V_MIN = 10.0         # in [0, 100]
 
 # Separate area thresholds inside the ROI (fraction of ROI pixels)
-RED_MIN_AREA_FRACTION = 0.35    # fraction of ROI for RED
-GREEN_MIN_AREA_FRACTION = 0.10  # fraction of ROI for GREEN
+RED_MIN_AREA_FRACTION = 0.30    # fraction of ROI for RED
+GREEN_MIN_AREA_FRACTION = 0.15  # fraction of ROI for GREEN
 
 # Extra RGB-based rules (channel differences) for robustness
 RED_RGB_MIN = 50        # minimum R value
@@ -73,9 +73,131 @@ GREEN_RGB_DELTA = 40    # G must be at least DELTA above R and B
 
 # ===================== Stateless single-frame detector =====================
 
-n", red_y_mean)
-bash: syntax error near unexpected token `"red_frac",'
+def detect_traffic_light_state_once(
+    frame_rgb: np.ndarray,
+    area_fraction_threshold: float = DEFAULT_TL_MIN_AREA_FRACTION,  # kept for API, not used
+) -> str:
+    """
+    Stateless, single-frame traffic-light detector.
 
+    Returns "RED", "GREEN", or "NONE".
+    """
+    if frame_rgb is None or frame_rgb.size == 0:
+        return "NONE"
+
+    h, w, _ = frame_rgb.shape
+
+    # --- 1. ROI: top half, wide horizontally ---
+    # We'll suppress the floor red line later using VERTICAL POSITION.
+    y0 = 0
+    y1 = int(0.5 * h)   # top 50% of the frame
+    x0 = int(0.10 * w)
+    x1 = int(0.90 * w)
+    roi = frame_rgb[y0:y1, x0:x1, :]
+
+    if roi.size == 0:
+        return "NONE"
+
+    roi_h, roi_w, _ = roi.shape
+    roi_pixels = roi_h * roi_w
+
+    # Split channels (0..255)
+    R = roi[..., 0].astype(np.float32)
+    G = roi[..., 1].astype(np.float32)
+    B = roi[..., 2].astype(np.float32)
+
+    # HSV for hue-based detection
+    H, S, V = rgb_to_hsv_np(roi)
+
+    # Valid pixels: bright enough
+    valid = V >= TL_V_MIN
+    if np.count_nonzero(valid) < 50:  # very small -> probably just noise
+        return "NONE"
+
+    # ----- HSV-based RED & GREEN masks -----
+    hsv_valid = valid & (S >= TL_S_MIN)
+
+    red_hsv_mask = hsv_valid & (
+        ((H >= RED_H_LO_1) & (H <= RED_H_HI_1)) |
+        ((H >= RED_H_LO_2) & (H <= RED_H_HI_2))
+    )
+
+    green_hsv_mask = hsv_valid & (H >= GREEN_H_LO) & (H <= GREEN_H_HI)
+
+    # ----- RGB-based fallback masks -----
+    # RED: R is high and clearly dominates G & B
+    red_rgb_mask = valid & (
+        (R >= RED_RGB_MIN) &
+        (R >= G + RED_RGB_DELTA) &
+        (R >= B + RED_RGB_DELTA)
+    )
+
+    # GREEN: G is high and clearly dominates R & B
+    green_rgb_mask = valid & (
+        (G >= GREEN_RGB_MIN) &
+        (G >= R + GREEN_RGB_DELTA) &
+        (G >= B + GREEN_RGB_DELTA)
+    )
+
+    # Combine HSV and RGB criteria
+    red_mask = red_hsv_mask | red_rgb_mask
+    green_mask = green_hsv_mask | green_rgb_mask
+
+    red_count = int(np.count_nonzero(red_mask))
+    green_count = int(np.count_nonzero(green_mask))
+
+    if red_count == 0 and green_count == 0:
+        return "NONE"
+
+    # FRACTION RELATIVE TO ROI
+    red_fraction = red_count / roi_pixels
+    green_fraction = green_count / roi_pixels
+
+    # --- 2. Suppress floor red line using VERTICAL POSITION ---
+
+    red_strong = False
+    green_strong = False
+
+    # Default values so we can safely refer to them even if counts are zero
+    red_y_mean = 0.0
+    green_y_mean = 0.0
+
+    # Compute vertical centroid (0 = top of ROI, 1 = bottom of ROI)
+    if red_count > 0:
+        ys_red, xs_red = np.nonzero(red_mask)
+        red_y_mean = ys_red.mean() / roi_h  # 0 top, 1 bottom
+        # Only accept RED if:
+        #   - enough area, AND
+        #   - its centroid is in the TOP PART of ROI (e.g. top 60%)
+        if red_fraction >= RED_MIN_AREA_FRACTION and red_y_mean < 0.6:
+            red_strong = True
+
+    if green_count > 0:
+        ys_green, xs_green = np.nonzero(green_mask)
+        green_y_mean = ys_green.mean() / roi_h
+        if green_fraction >= GREEN_MIN_AREA_FRACTION and green_y_mean < 0.6:
+            green_strong = True
+
+    # --- 3. Symmetric decision logic: RED and GREEN same priority ---
+
+    # Neither colour strong enough in the right vertical region
+    if not red_strong and not green_strong:
+        return "NONE"
+
+    # Only one colour strong
+    if red_strong and not green_strong:
+        return "RED"
+    if green_strong and not red_strong:
+        return "GREEN"
+
+    # Both strong -> choose the one with larger area
+    if red_fraction > green_fraction:
+        return "RED"
+    elif green_fraction > red_fraction:
+        return "GREEN"
+    else:
+        # Exact tie: ambiguous; let stateful wrapper hold last state
+        return "NONE"
 
 # ===================== Stateful wrapper with hold time =====================
 
