@@ -1,247 +1,191 @@
 #!/usr/bin/env python3
 """
-pi_tflite_traffic_signs.py
+Real-time TFLite image classification on Raspberry Pi using PiCamera2.
 
-Use a Teachable Machine TensorFlow Lite model on a Raspberry Pi
-to recognise traffic signs and show the top prediction.
-
-This version uses Picamera2 instead of cv2.VideoCapture,
-which works reliably with the official Raspberry Pi Camera Module
-on modern Raspberry Pi OS.
-
-Expected files in the same folder:
-  - model.tflite  (Teachable Machine export, TensorFlow Lite)
-  - labels.txt    (one label per line, in the order of model outputs)
-
-Example labels.txt (simplified, no numbers at the front):
-  background
-  stop
-  person
-  slow
-  uturn
+- Shows a live preview window.
+- Overlays the top predicted label and confidence on the video.
+- Prints top-3 predictions to the console once per second.
 """
 
-import argparse
+import os
 import time
-from pathlib import Path
 
-import numpy as np
 import cv2
-
-# Picamera2 for Raspberry Pi Camera Module
+import numpy as np
+from PIL import Image
 from picamera2 import Picamera2
+from tflite_runtime.interpreter import Interpreter
 
-# Try to import TFLite interpreter from tflite_runtime (lightweight) first,
-# then fall back to tensorflow.lite if needed.
-try:
-    from tflite_runtime.interpreter import Interpreter
-    print("Using tflite_runtime.interpreter")
-except ImportError:
-    try:
-        from tensorflow.lite import Interpreter  # type: ignore
-        print("Using tensorflow.lite.Interpreter")
-    except ImportError as e:
-        raise ImportError(
-            "Could not import tflite_runtime or tensorflow.lite.\n"
-            "Install one of them, e.g.:\n"
-            "  pip3 install tflite-runtime\n"
-        ) from e
+# ---------------------------------------------------------------------
+# Paths: model & labels (kept next to this script in the tflite folder)
+# ---------------------------------------------------------------------
 
-# ------------------------ Utility: Load labels ------------------------ #
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(SCRIPT_DIR, "model.tflite")
+LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 
-def load_labels(labels_path: str):
-    """
-    Load labels from labels.txt (one label per line).
+# ---------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------
 
-    If a line starts with '0 ' or '1 ' (Teachable Machine style),
-    strip the leading index and space, just in case.
-    """
-    labels = {}
-    with open(labels_path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            label = line.strip()
-            if not label:
-                continue
-            parts = label.split(" ", 1)
-            if len(parts) == 2 and parts[0].isdigit():
-                label = parts[1]
-            labels[i] = label
+def load_labels(path):
+    """Load labels from a text file (one label per line)."""
+    labels = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:  # skip empty lines
+                labels.append(line)
     return labels
 
-# ------------------------ Utility: Preprocess frame ------------------------ #
-
-def preprocess_frame_bgr(frame_bgr: np.ndarray, input_size):
+def set_input_tensor(interpreter, image):
     """
-    Resize and convert a BGR OpenCV frame to the model's input shape.
+    Resize and copy a PIL Image into the TFLite interpreter input tensor.
 
-    input_size: (height, width)
-    Returns a numpy array ready to feed into the TFLite interpreter.
+    Handles both uint8 and float32 input types.
     """
-    h, w = input_size
-    frame_resized = cv2.resize(frame_bgr, (w, h))
-    # Convert BGR (OpenCV) to RGB for the model
-    frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-    input_data = np.expand_dims(frame_rgb, axis=0).astype(np.uint8)
-    return input_data
+    input_details = interpreter.get_input_details()[0]
+    height, width = input_details["shape"][1], input_details["shape"][2]
 
-# ------------------------ Action mapping (behaviour) ------------------------ #
+    # Ensure RGB and resize to model input size
+    image = image.convert("RGB").resize((width, height), Image.BILINEAR)
 
-def handle_prediction(label: str, score: float):
+    input_data = np.array(image)
+
+    # Add batch dimension: (H, W, C) -> (1, H, W, C)
+    input_data = np.expand_dims(input_data, axis=0)
+
+    # Adjust type according to input tensor type
+    if input_details["dtype"] == np.uint8:
+        input_data = input_data.astype(np.uint8)
+    else:  # typically float32
+        input_data = input_data.astype(np.float32) / 255.0
+
+    interpreter.set_tensor(input_details["index"], input_data)
+
+def classify_image(interpreter, top_k=3):
     """
-    Decide what to do based on the predicted label and score.
+    Run inference and return top_k (class_index, score) pairs.
 
-    For now, it only prints actions. You can connect this to your
-    motor control / line-following code later if you want.
+    Handles quantized outputs correctly using scale and zero_point if present.
     """
+    interpreter.invoke()
 
-    CONFIDENCE_THRESHOLD = 0.6
-    if score < CONFIDENCE_THRESHOLD:
-        print(f"Low confidence ({score:.2f}) - treating as background/none.")
-        return
+    output_details = interpreter.get_output_details()[0]
+    output_data = interpreter.get_tensor(output_details["index"])[0]
 
-    label_lc = label.lower()
-
-    if label_lc == "stop":
-        print("ACTION: STOP car (detected STOP sign)")
-    elif label_lc in ("tl_red", "red", "traffic_red"):
-        print("ACTION: RED traffic light -> STOP")
-    elif label_lc in ("tl_yellow", "yellow", "traffic_yellow"):
-        print("ACTION: YELLOW traffic light -> SLOW / PREPARE TO STOP")
-    elif label_lc in ("tl_green", "green", "traffic_green"):
-        print("ACTION: GREEN traffic light -> GO")
-    elif label_lc == "slow":
-        print("ACTION: SLOW DOWN")
-    elif label_lc == "uturn":
-        print("ACTION: U-TURN")
-    elif label_lc in ("person", "human"):
-        print("ACTION: PERSON detected -> STOP or SLOW for safety")
-    elif label_lc == "animal":
-        print("ACTION: ANIMAL detected -> STOP or SLOW for safety")
-    elif label_lc == "background":
-        print("No sign detected (background).")
+    # Dequantize if needed
+    if output_details["dtype"] == np.uint8:
+        scale, zero_point = output_details.get("quantization", (1.0, 0))
+        scores = (output_data.astype(np.float32) - zero_point) * scale
     else:
-        print(f"No specific action mapped for label '{label_lc}'.")
+        scores = output_data.astype(np.float32)
 
-# ------------------------ Main inference loop using Picamera2 ------------------------ #
+    # Get indices of top k scores
+    top_k_indices = np.argsort(scores)[::-1][:top_k]
+    return [(i, scores[i]) for i in top_k_indices]
 
-def run_inference(
-    model_path: str,
-    labels_path: str,
-    display: bool = True,
-):
-    # Load labels
-    labels = load_labels(labels_path)
-    print("Loaded labels:", labels)
+# ---------------------------------------------------------------------
+# Main real-time loop
+# ---------------------------------------------------------------------
 
-    # Load TFLite model
-    interpreter = Interpreter(model_path=model_path)
+def main():
+    # 1. Load model and labels
+    print("Loading TFLite model...")
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+    if not os.path.exists(LABELS_PATH):
+        raise FileNotFoundError(f"Labels file not found: {LABELS_PATH}")
+
+    interpreter = Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
 
-    # Get input & output details
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+    labels = load_labels(LABELS_PATH)
+    print(f"Loaded {len(labels)} labels.")
 
-    input_shape = input_details[0]["shape"]  # e.g. [1, 224, 224, 3]
-    _, input_h, input_w, _ = input_shape
-    print(f"Model input shape: {input_shape}")
+    # 2. Set up PiCamera2 for preview
+    camera = Picamera2()
+    # Use a reasonable preview configuration (you can tweak resolution if desired)
+    preview_config = camera.create_preview_configuration()
+    camera.configure(preview_config)
+    camera.start()
+    print("Camera started.")
+    print("Press 'q' in the preview window or Ctrl+C in the terminal to stop.")
 
-    # ---------------- Picamera2 setup ---------------- #
-    picam = Picamera2()
-    # Use a reasonable preview size; we'll resize to model size anyway
-    config = picam.create_preview_configuration(
-        main={"size": (640, 480), "format": "RGB888"}
-    )
-    picam.configure(config)
-    picam.start()
-    time.sleep(0.5)  # small warm-up
-
-    print("Camera started. Press 'q' in the window or Ctrl+C in the terminal to quit.")
+    last_print_time = 0.0
+    print_interval = 1.0  # seconds between console logs
 
     try:
         while True:
-            # Capture RGB frame from Picamera2
-            frame_rgb = picam.capture_array()  # shape (H, W, 3), RGB order
+            # 3. Capture a frame as a NumPy array (RGB)
+            frame = camera.capture_array()  # shape (H, W, 3), RGB
 
-            # Convert to BGR for OpenCV drawing
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            # Convert to PIL Image for TFLite preprocessing
+            image = Image.fromarray(frame)
 
-            # Preprocess for model
-            input_data = preprocess_frame_bgr(frame_bgr, (input_h, input_w))
+            # 4. Run inference
+            set_input_tensor(interpreter, image)
+            results = classify_image(interpreter, top_k=3)
 
-            interpreter.set_tensor(input_details[0]["index"], input_data)
-            t0 = time.time()
-            interpreter.invoke()
-            infer_time = (time.time() - t0) * 1000.0  # ms
+            if not results:
+                # No result: just show frame without text
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                cv2.imshow("PiCar TFLite Real-Time Preview", frame_bgr)
+            else:
+                # Top result
+                top_id, top_score = results[0]
+                if 0 <= top_id < len(labels):
+                    top_label = labels[top_id]
+                else:
+                    top_label = f"Class {top_id}"
 
-            output_data = interpreter.get_tensor(output_details[0]["index"])[0]
-            top_index = int(np.argmax(output_data))
-            top_score = float(output_data[top_index])
-            label = labels.get(top_index, f"class_{top_index}")
+                label_text = f"{top_label}: {top_score:.2f}"
 
-            print(f"Prediction: {label} ({top_score:.2f})  |  Inference time: {infer_time:.1f} ms")
+                # 5. Console logging (top-3 once per second)
+                now = time.time()
+                if now - last_print_time >= print_interval:
+                    print("Top predictions:")
+                    for class_id, score in results:
+                        if 0 <= class_id < len(labels):
+                            name = labels[class_id]
+                        else:
+                            name = f"Class {class_id}"
+                        print(f"  {name:30s}  {score:.3f}")
+                    print("-" * 40)
+                    last_print_time = now
 
-            handle_prediction(label, top_score)
-
-            if display:
-                text = f"{label}: {top_score:.2f}"
+                # 6. Draw overlay text on the frame
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 cv2.putText(
                     frame_bgr,
-                    text,
-                    (10, 30),
+                    label_text,
+                    (10, 30),  # position (x, y)
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 0),
-                    2,
-                    cv2.LINE_AA,
+                    0.8,              # font scale
+                    (0, 255, 0),      # color (B, G, R) = green
+                    2,                # thickness
+                    cv2.LINE_AA
                 )
-                cv2.imshow("Traffic Sign Detection (Picamera2)", frame_bgr)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
+
+                # 7. Show frame
+                cv2.imshow("PiCar TFLite Real-Time Preview", frame_bgr)
+
+            # 8. Check for 'q' key to quit
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("Exit key 'q' pressed.")
+                break
 
     except KeyboardInterrupt:
         print("Interrupted by user (Ctrl+C).")
 
     finally:
-        picam.stop()
-        if display:
-            cv2.destroyAllWindows()
+        camera.stop()
+        cv2.destroyAllWindows()
+        print("Camera and windows closed. Program finished.")
 
-# ------------------------ CLI entry point ------------------------ #
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Raspberry Pi TFLite traffic sign detection (Teachable Machine model, Picamera2)."
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="model.tflite",
-        help="Path to TFLite model file (default: model.tflite in current folder).",
-    )
-    parser.add_argument(
-        "--labels",
-        type=str,
-        default="labels.txt",
-        help="Path to labels file (default: labels.txt in current folder).",
-    )
-    parser.add_argument(
-        "--no-display",
-        action="store_true",
-        help="Disable OpenCV window display (useful via SSH).",
-    )
-
-    args = parser.parse_args()
-
-    model_path = str(Path(args.model).expanduser())
-    labels_path = str(Path(args.labels).expanduser())
-    display = not args.no_display
-
-    run_inference(
-        model_path=model_path,
-        labels_path=labels_path,
-        display=display,
-    )
+# ---------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
