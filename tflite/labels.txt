@@ -1,5 +1,5 @@
-0 background
-1 stop
-2 person
-3 slow
-4 uturn
+background
+stop
+person
+slow
+uturn
