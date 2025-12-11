@@ -1,7 +1,5 @@
-background
-airplane
-bicycle
-bird
-car
-human
-...
+0 background
+1 stop
+2 person
+3 slow
+4 uturn
