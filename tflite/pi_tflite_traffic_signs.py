@@ -5,18 +5,18 @@ pi_tflite_traffic_signs.py
 Use a Teachable Machine TensorFlow Lite model on a Raspberry Pi
 to recognise traffic signs and show the top prediction.
 
+This version uses Picamera2 instead of cv2.VideoCapture,
+which works reliably with the official Raspberry Pi Camera Module
+on modern Raspberry Pi OS.
+
 Expected files in the same folder:
   - model.tflite  (Teachable Machine export, TensorFlow Lite)
   - labels.txt    (one label per line, in the order of model outputs)
 
-Recommended labels for your project:
+Example labels.txt (simplified, no numbers at the front):
   background
   stop
   person
-  animal
-  tl_red
-  tl_yellow
-  tl_green
   slow
   uturn
 """
@@ -27,6 +27,9 @@ from pathlib import Path
 
 import numpy as np
 import cv2
+
+# Picamera2 for Raspberry Pi Camera Module
+from picamera2 import Picamera2
 
 # Try to import TFLite interpreter from tflite_runtime (lightweight) first,
 # then fall back to tensorflow.lite if needed.
@@ -50,20 +53,24 @@ def load_labels(labels_path: str):
     """
     Load labels from labels.txt (one label per line).
 
-    Returns a dict: {class_index: label_string}
-    where class_index is 0-based.
+    If a line starts with '0 ' or '1 ' (Teachable Machine style),
+    strip the leading index and space, just in case.
     """
     labels = {}
     with open(labels_path, "r", encoding="utf-8") as f:
         for i, line in enumerate(f):
             label = line.strip()
-            if label:
-                labels[i] = label
+            if not label:
+                continue
+            parts = label.split(" ", 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                label = parts[1]
+            labels[i] = label
     return labels
 
 # ------------------------ Utility: Preprocess frame ------------------------ #
 
-def preprocess_frame(frame: np.ndarray, input_size):
+def preprocess_frame_bgr(frame_bgr: np.ndarray, input_size):
     """
     Resize and convert a BGR OpenCV frame to the model's input shape.
 
@@ -71,11 +78,9 @@ def preprocess_frame(frame: np.ndarray, input_size):
     Returns a numpy array ready to feed into the TFLite interpreter.
     """
     h, w = input_size
-    # Teachable Machine models are usually 224x224 or 192x192, RGB uint8
-    frame_resized = cv2.resize(frame, (w, h))
-    # Convert BGR (OpenCV) to RGB
+    frame_resized = cv2.resize(frame_bgr, (w, h))
+    # Convert BGR (OpenCV) to RGB for the model
     frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-    # Add batch dimension: (1, h, w, 3)
     input_data = np.expand_dims(frame_rgb, axis=0).astype(np.uint8)
     return input_data
 
@@ -86,65 +91,42 @@ def handle_prediction(label: str, score: float):
     Decide what to do based on the predicted label and score.
 
     For now, it only prints actions. You can connect this to your
-    motor control / line-following code (e.g. in line.py).
+    motor control / line-following code later if you want.
     """
 
-    # Only react if we're confident enough
     CONFIDENCE_THRESHOLD = 0.6
     if score < CONFIDENCE_THRESHOLD:
         print(f"Low confidence ({score:.2f}) - treating as background/none.")
         return
 
-    # Normalise label to lower-case just in case
     label_lc = label.lower()
 
-    # You can customise this mapping for your car:
     if label_lc == "stop":
         print("ACTION: STOP car (detected STOP sign)")
-        # TODO: call your motor control code to stop
-
     elif label_lc in ("tl_red", "red", "traffic_red"):
-        print("ACTION: Treat as RED traffic light -> STOP")
-        # TODO: integrate with your traffic light logic
-
+        print("ACTION: RED traffic light -> STOP")
     elif label_lc in ("tl_yellow", "yellow", "traffic_yellow"):
-        print("ACTION: YELLOW traffic light -> PREPARE TO STOP / SLOW DOWN")
-        # TODO: maybe slow down
-
+        print("ACTION: YELLOW traffic light -> SLOW / PREPARE TO STOP")
     elif label_lc in ("tl_green", "green", "traffic_green"):
         print("ACTION: GREEN traffic light -> GO")
-        # TODO: resume/continue
-
     elif label_lc == "slow":
         print("ACTION: SLOW DOWN")
-        # TODO: reduce motor speed
-
     elif label_lc == "uturn":
         print("ACTION: U-TURN")
-        # TODO: implement U-turn behaviour
-
     elif label_lc in ("person", "human"):
         print("ACTION: PERSON detected -> STOP or SLOW for safety")
-        # TODO: stop / slow car
-
     elif label_lc == "animal":
         print("ACTION: ANIMAL detected -> STOP or SLOW for safety")
-        # TODO: stop / slow car
-
     elif label_lc == "background":
-        # Nothing special
         print("No sign detected (background).")
-
     else:
-        # Unknown label - just print it
         print(f"No specific action mapped for label '{label_lc}'.")
 
-# ------------------------ Main inference loop ------------------------ #
+# ------------------------ Main inference loop using Picamera2 ------------------------ #
 
 def run_inference(
     model_path: str,
     labels_path: str,
-    camera_index: int = 0,
     display: bool = True,
 ):
     # Load labels
@@ -159,57 +141,51 @@ def run_inference(
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
-    # Assume a single input tensor: (1, h, w, 3)
-    input_shape = input_details[0]["shape"]
+    input_shape = input_details[0]["shape"]  # e.g. [1, 224, 224, 3]
     _, input_h, input_w, _ = input_shape
     print(f"Model input shape: {input_shape}")
 
-    # Open camera
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open camera index {camera_index}")
+    # ---------------- Picamera2 setup ---------------- #
+    picam = Picamera2()
+    # Use a reasonable preview size; we'll resize to model size anyway
+    config = picam.create_preview_configuration(
+        main={"size": (640, 480), "format": "RGB888"}
+    )
+    picam.configure(config)
+    picam.start()
+    time.sleep(0.5)  # small warm-up
 
-    print("Press 'q' in the window or Ctrl+C in the terminal to quit.")
+    print("Camera started. Press 'q' in the window or Ctrl+C in the terminal to quit.")
+
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to grab frame from camera.")
-                break
+            # Capture RGB frame from Picamera2
+            frame_rgb = picam.capture_array()  # shape (H, W, 3), RGB order
 
-            # Preprocess frame for model input
-            input_data = preprocess_frame(frame, (input_h, input_w))
+            # Convert to BGR for OpenCV drawing
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-            # Feed into interpreter
+            # Preprocess for model
+            input_data = preprocess_frame_bgr(frame_bgr, (input_h, input_w))
+
             interpreter.set_tensor(input_details[0]["index"], input_data)
             t0 = time.time()
             interpreter.invoke()
             infer_time = (time.time() - t0) * 1000.0  # ms
 
-            # Get output
-            output_data = interpreter.get_tensor(output_details[0]["index"])[0]  # shape: (num_classes,)
-
-            # Teachable Machine TFLite models often output float32 probabilities
-            # but check output_details[0]["dtype"] if needed.
-            # Find top prediction
+            output_data = interpreter.get_tensor(output_details[0]["index"])[0]
             top_index = int(np.argmax(output_data))
             top_score = float(output_data[top_index])
-
-            # Look up label
             label = labels.get(top_index, f"class_{top_index}")
 
-            # Print to terminal
             print(f"Prediction: {label} ({top_score:.2f})  |  Inference time: {infer_time:.1f} ms")
 
-            # Call action mapping
             handle_prediction(label, top_score)
 
-            # Show on screen (for debugging / teaching)
             if display:
-                # Draw label & confidence on frame
                 text = f"{label}: {top_score:.2f}"
                 cv2.putText(
-                    frame,
+                    frame_bgr,
                     text,
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -218,9 +194,7 @@ def run_inference(
                     2,
                     cv2.LINE_AA,
                 )
-                cv2.imshow("Traffic Sign Detection", frame)
-
-                # Quit with 'q'
+                cv2.imshow("Traffic Sign Detection (Picamera2)", frame_bgr)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
@@ -229,7 +203,7 @@ def run_inference(
         print("Interrupted by user (Ctrl+C).")
 
     finally:
-        cap.release()
+        picam.stop()
         if display:
             cv2.destroyAllWindows()
 
@@ -237,7 +211,7 @@ def run_inference(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Raspberry Pi TFLite traffic sign detection (Teachable Machine model)."
+        description="Raspberry Pi TFLite traffic sign detection (Teachable Machine model, Picamera2)."
     )
     parser.add_argument(
         "--model",
@@ -250,12 +224,6 @@ def main():
         type=str,
         default="labels.txt",
         help="Path to labels file (default: labels.txt in current folder).",
-    )
-    parser.add_argument(
-        "--camera",
-        type=int,
-        default=0,
-        help="Camera index for OpenCV VideoCapture (default: 0).",
     )
     parser.add_argument(
         "--no-display",
@@ -272,7 +240,6 @@ def main():
     run_inference(
         model_path=model_path,
         labels_path=labels_path,
-        camera_index=args.camera,
         display=display,
     )
 
