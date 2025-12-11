@@ -64,7 +64,7 @@ TL_S_MIN = 15.0         # in [0, 100]
 TL_V_MIN = 10.0         # in [0, 100]
 
 # Separate area thresholds inside the ROI (fraction of ROI pixels)
-RED_MIN_AREA_FRACTION = 0.20    # 5% of ROI is enough for RED
+RED_MIN_AREA_FRACTION = 0.30    # 5% of ROI is enough for RED
 GREEN_MIN_AREA_FRACTION = 0.15  # 15% of ROI required for GREEN
 
 # Extra RGB-based rules (channel differences) for robustness
