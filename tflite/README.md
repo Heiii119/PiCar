@@ -14,3 +14,24 @@ cd ~/PiCarModels/traffic_signs
 scp model.tflite pi@raspberrypi.local:/home/pi/PiCar/
 scp labels.txt   pi@raspberrypi.local:/home/pi/PiCar/
 ```
+
+### Camera test
+```bash
+python3 - << 'EOF'
+import cv2
+
+print("Checking camera indexes 0, 1, 2 ...")
+for i in range(3):
+    cap = cv2.VideoCapture(i)
+    print(f"Camera {i} opened =", cap.isOpened())
+    if cap.isOpened():
+        ret, frame = cap.read()
+        print("  read =", ret, "; shape =", None if not ret else frame.shape)
+    cap.release()
+EOF
+```
+
+#### Picamera2 preview window check
+```bash
+libcamera-hello
+```
