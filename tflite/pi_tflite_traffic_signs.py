@@ -31,8 +31,8 @@ LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 # ---------------------------------------------------------------------
 
 BACKGROUND_LABEL = "background"   # must match the label name in labels.txt
-BACKGROUND_THRESHOLD = 0.95       # only accept background if score >= 0.95
-SIGN_THRESHOLD = 0.40             # accept any non-background sign if score >= 0.40
+BACKGROUND_THRESHOLD = 0.90       # only accept background if score >= 0.95
+SIGN_THRESHOLD = 0.30             # accept any non-background sign if score >= 0.40
 
 # ---------------------------------------------------------------------
 # Helper functions
