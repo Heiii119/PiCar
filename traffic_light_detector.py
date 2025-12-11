@@ -100,9 +100,12 @@ def detect_traffic_light_state_once(
 
     h, w, _ = frame_rgb.shape
 
-    # Large central ROI to include the light in front of the camera
-    y0 = int(0.05 * h)
-    y1 = int(0.95 * h)
+    # Traffic light ROI: only look in the TOP HALF of the image
+    # so the floor / line at the bottom is ignored.
+    #
+    # Adjust 0.5 -> 0.6 or 0.4 depending on where your light is in view.
+    y0 = 0
+    y1 = int(0.5 * h)   # top 50% of the frame
     x0 = int(0.10 * w)
     x1 = int(0.90 * w)
     roi = frame_rgb[y0:y1, x0:x1, :]
