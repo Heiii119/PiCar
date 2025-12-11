@@ -6,8 +6,6 @@
 # It uses BOTH:
 #   - HSV-based detection, and
 #   - Simple RGB-based rules (R >> G,B for RED; G >> R,B for GREEN)
-#
-# and returns a single state, with RED having priority.
 
 import time
 import numpy as np
@@ -46,7 +44,7 @@ def rgb_to_hsv_np(rgb):
 
 DEFAULT_TL_HOLD_TIME = 1.5  # seconds to hold last seen RED/GREEN
 
-# Keep for compatibility (not used directly in the final logic)
+# Kept for compatibility (not used directly in the final logic)
 DEFAULT_TL_MIN_AREA_FRACTION = 0.20
 
 # HSV hue ranges in degrees [0, 360)
@@ -59,16 +57,15 @@ GREEN_H_LO = 60.0       # allow more yellowish greens
 GREEN_H_HI = 170.0      # allow bluish greens
 
 # Minimum saturation & value (brightness) to be considered "coloured"
-# Lowered to make dimmer / less saturated colours still count.
 TL_S_MIN = 15.0         # in [0, 100]
 TL_V_MIN = 10.0         # in [0, 100]
 
 # Separate area thresholds inside the ROI (fraction of ROI pixels)
-RED_MIN_AREA_FRACTION = 0.30    # 5% of ROI is enough for RED
-GREEN_MIN_AREA_FRACTION = 0.15  # 15% of ROI required for GREEN
+RED_MIN_AREA_FRACTION = 0.30    # fraction of ROI for RED
+GREEN_MIN_AREA_FRACTION = 0.15  # fraction of ROI for GREEN
 
 # Extra RGB-based rules (channel differences) for robustness
-RED_RGB_MIN = 50        # minimum R value (0..255-ish scaled to 0..100 via V, but we use raw RGB)
+RED_RGB_MIN = 50        # minimum R value
 RED_RGB_DELTA = 40      # R must be at least DELTA above G and B
 
 GREEN_RGB_MIN = 60      # minimum G value
@@ -101,9 +98,6 @@ def detect_traffic_light_state_once(
     h, w, _ = frame_rgb.shape
 
     # Traffic light ROI: only look in the TOP HALF of the image
-    # so the floor / line at the bottom is ignored.
-    #
-    # Adjust 0.5 -> 0.6 or 0.4 depending on where your light is in view.
     y0 = 0
     y1 = int(0.5 * h)   # top 50% of the frame
     x0 = int(0.10 * w)
@@ -165,18 +159,29 @@ def detect_traffic_light_state_once(
     red_fraction = red_count / roi_pixels
     green_fraction = green_count / roi_pixels
 
-    # --- Decision logic with RED priority ---
+    # --- Symmetric decision logic: RED and GREEN same priority ---
 
-    # 1) If we see *enough red*, call RED (even if there is some green)
-    if red_fraction >= RED_MIN_AREA_FRACTION:
+    red_strong = red_fraction >= RED_MIN_AREA_FRACTION
+    green_strong = green_fraction >= GREEN_MIN_AREA_FRACTION
+
+    # 1) Neither colour is strong enough
+    if not red_strong and not green_strong:
+        return "NONE"
+
+    # 2) Only one colour strong
+    if red_strong and not green_strong:
         return "RED"
-
-    # 2) Otherwise, if we see enough green, call GREEN
-    if green_fraction >= GREEN_MIN_AREA_FRACTION:
+    if green_strong and not red_strong:
         return "GREEN"
 
-    # 3) Otherwise, neither colour strong enough
-    return "NONE"
+    # 3) Both strong -> choose the one with larger area
+    if red_fraction > green_fraction:
+        return "RED"
+    elif green_fraction > red_fraction:
+        return "GREEN"
+    else:
+        # Exact tie: ambiguous; let the stateful wrapper hold the last state
+        return "NONE"
 
 # ===================== Stateful wrapper with hold time =====================
 
