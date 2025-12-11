@@ -5,6 +5,7 @@ python3 -m pip install --extra-index-url https://google-coral.github.io/py-repo/
 
 ### Save the files as
 C:\Users\YourName\PiCarModels\traffic_signs\model.tflite
+
 C:\Users\YourName\PiCarModels\traffic_signs\labels.txt
 
 ### On PC, Copy these files into the same folder
