@@ -33,6 +33,9 @@ import board
 import busio
 from adafruit_pca9685 import PCA9685
 
+# >>> NEW: traffic light module import <<<
+from traffic_light_detector import TrafficLightDetector
+
 # ------------------------------
 # Configuration
 # ------------------------------
@@ -388,6 +391,10 @@ class LineFollowerDiscrete:
         self.no_line_phase = "idle"           # "idle" | "neutral" | "reverse"
         self.no_line_phase_start = None
 
+        # >>> NEW: Traffic light detector state <<<
+        self.tl_detector = TrafficLightDetector()
+        self.traffic_state = "NONE"           # "RED", "GREEN", "NONE"
+
     # ------------- Lifecycle -------------
     def start(self):
         self.camera.start()
@@ -527,7 +534,10 @@ class LineFollowerDiscrete:
             # Perception
             frame = self.camera.get_frame()
             if frame is not None:
-                # Downscale by striding
+                # >>> NEW: Traffic light detection on full RGB frame <<<
+                self.traffic_state = self.tl_detector.update(frame, tnow)
+
+                # Downscale by striding for line detection
                 scale_y = frame.shape[0] / IMAGE_H
                 scale_x = frame.shape[1] / IMAGE_W
                 small = frame[::int(max(1, round(scale_y))), ::int(max(1, round(scale_x))), :]
@@ -684,6 +694,15 @@ class LineFollowerDiscrete:
             k = 1.0 - CURVE_SLOWDOWN_GAIN * curve_mag
             throttle_pwm = int(np.interp(k, [0.0, 1.0], [stop_pwm, fwd_pwm]))
 
+        # >>> NEW: Traffic light override (on top of existing line follower) <<<
+        if self.traffic_state == "RED":
+            throttle_pwm = stop_pwm
+            self.msg = "RED light -> STOP"
+        elif self.traffic_state == "GREEN":
+            # Do not change throttle, just an informative message
+            self.msg = "GREEN light -> GO"
+        # If "NONE": no change
+
         spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
         tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, throttle_pwm)
         return spwm, tpwm
@@ -723,32 +742,34 @@ class LineFollowerDiscrete:
             self.stdscr.addstr(5, 0, f"Decision     : {self.last_decision}")
             self.stdscr.addstr(6, 0, f"Error (norm) : {self.last_center_err:+.3f}")
             self.stdscr.addstr(7, 0, f"Curvature    : {self.last_curvature:+.4f}")
+            # >>> NEW: show traffic light state <<<
+            self.stdscr.addstr(8, 0, f"Traffic light: {self.traffic_state}")
 
             # PWM outputs (manual shown in MANUAL, target in AUTO)
             if self.auto_mode:
-                self.stdscr.addstr(9, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
+                self.stdscr.addstr(10, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
             else:
-                self.stdscr.addstr(9, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
+                self.stdscr.addstr(10, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
 
             # ROI/Thresholds
-            self.stdscr.addstr(11, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
+            self.stdscr.addstr(12, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
 
             # Perf (rough estimates)
             now = time.time()
             ctrl_fps = self.ctrl_count / max(1e-3, (now - self.ctrl_t0))
             self.ctrl_count = 0
             self.ctrl_t0 = now
-            self.stdscr.addstr(13, 0, f"Control loop target: {CONTROL_LOOP_HZ} Hz | est: {ctrl_fps:5.1f} Hz")
-            self.stdscr.addstr(14, 0, f"Camera target: {CAMERA_LOOP_HZ} Hz   | (Picamera2 internal)")
+            self.stdscr.addstr(14, 0, f"Control loop target: {CONTROL_LOOP_HZ} Hz | est: {ctrl_fps:5.1f} Hz")
+            self.stdscr.addstr(15, 0, f"Camera target: {CAMERA_LOOP_HZ} Hz   | (Picamera2 internal)")
 
             # Controls help
-            self.stdscr.addstr(16, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
+            self.stdscr.addstr(17, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
             if self.mode == "color":
-                self.stdscr.addstr(17, 0, "Tip: run with --calibrate to quickly set HSV band from ROI")
+                self.stdscr.addstr(18, 0, "Tip: run with --calibrate to quickly set HSV band from ROI")
 
             # Message line
             if self.msg:
-                self.stdscr.addstr(19, 0, f"Msg: {self.msg}".ljust(cols-1))
+                self.stdscr.addstr(20, 0, f"Msg: {self.msg}".ljust(cols-1))
 
             self.stdscr.refresh()
         except curses.error:
@@ -806,4 +827,3 @@ def main(stdscr):
 
 if __name__ == "__main__":
     curses.wrapper(main)
-
