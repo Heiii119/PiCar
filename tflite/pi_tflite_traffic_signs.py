@@ -2,10 +2,12 @@
 """
 Real-time TFLite traffic sign classification on Raspberry Pi using PiCamera2.
 
-- Shows a live preview window.
-- Overlays the top predicted label and confidence on the video.
-- Prints top-3 predictions to the console once per second.
-- Calls handle_prediction() to map labels to actions (STOP / SLOW / UTURN, etc.).
+Features:
+- Live camera preview window.
+- Overlays the best predicted label + confidence.
+- Prints top-3 predictions (for the best region) to the console once per second.
+- Multi-ROI scanning so signs don't have to be perfectly centred.
+- Background-suppression logic to reduce cases where a real sign is called "background".
 """
 
 import os
@@ -26,6 +28,35 @@ MODEL_PATH = os.path.join(SCRIPT_DIR, "model.tflite")
 LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 
 # ---------------------------------------------------------------------
+# Regions of Interest (ROIs)
+# ---------------------------------------------------------------------
+# (name, x1_frac, y1_frac, x2_frac, y2_frac)
+# Fractions are relative to full frame (0.0 = left/top, 1.0 = right/bottom).
+# Each region is roughly 1/9 of the frame.
+ROIS = [
+    ("top_left",    0.0, 0.0,  1/3, 1/3),  # top left
+    ("top_center",  1/3, 0.0,  2/3, 1/3),  # top middle
+    ("top_right",   2/3, 0.0,  1.0, 1/3),  # top right
+    ("mid_left",    0.0, 1/3,  1/3, 2/3),  # middle left
+    ("mid_right",   2/3, 1/3,  1.0, 2/3),  # middle right
+]
+
+# ---------------------------------------------------------------------
+# Thresholds / tuning knobs
+# ---------------------------------------------------------------------
+
+# Global confidence threshold for taking an action on a sign
+CONFIDENCE_THRESHOLD = 0.50   # change this to 0.4 / 0.6 / 0.7 as you like
+
+# How much more confident "background" must be to beat a sign
+# Smaller = trust background less (more likely to choose sign)
+# Larger  = trust background more
+BACKGROUND_MARGIN = 0.15
+
+# Minimum score for a non-background sign to be considered "strong enough"
+SIGN_MIN_SCORE = 0.40
+
+# ---------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------
 
@@ -37,34 +68,39 @@ def load_labels(path):
             line = line.strip()
             if not line:
                 continue
-            # If line is like "0 background", drop the leading number.
+            # If line is like "0 background", drop leading index.
             parts = line.split(" ", 1)
             if len(parts) == 2 and parts[0].isdigit():
                 line = parts[1]
             labels.append(line)
     return labels
 
-def set_input_tensor(interpreter, image):
+def crop_region(image: Image.Image, x1f: float, y1f: float, x2f: float, y2f: float) -> Image.Image:
+    """Crop a region from a PIL image using fractional coordinates."""
+    w, h = image.size
+    x1 = int(x1f * w)
+    y1 = int(y1f * h)
+    x2 = int(x2f * w)
+    y2 = int(y2f * h)
+    return image.crop((x1, y1, x2, y2))
+
+def set_input_tensor(interpreter, image: Image.Image):
     """
     Resize and copy a PIL Image into the TFLite interpreter input tensor.
-
-    Handles both uint8 and float32 input types.
+    Handles both uint8 and float32 models.
     """
     input_details = interpreter.get_input_details()[0]
     height, width = input_details["shape"][1], input_details["shape"][2]
 
-    # Ensure RGB and resize to model input size
+    # Ensure RGB and resize
     image = image.convert("RGB").resize((width, height), Image.BILINEAR)
 
     input_data = np.array(image)
+    input_data = np.expand_dims(input_data, axis=0)  # (H, W, C) -> (1, H, W, C)
 
-    # Add batch dimension: (H, W, C) -> (1, H, W, C)
-    input_data = np.expand_dims(input_data, axis=0)
-
-    # Adjust type according to input tensor type
     if input_details["dtype"] == np.uint8:
         input_data = input_data.astype(np.uint8)
-    else:  # typically float32
+    else:
         input_data = input_data.astype(np.float32) / 255.0
 
     interpreter.set_tensor(input_details["index"], input_data)
@@ -72,22 +108,19 @@ def set_input_tensor(interpreter, image):
 def classify_image(interpreter, top_k=3):
     """
     Run inference and return top_k (class_index, score) pairs.
-
-    Handles quantized outputs correctly using scale and zero_point if present.
+    Handles quantized outputs using scale and zero_point if present.
     """
     interpreter.invoke()
 
     output_details = interpreter.get_output_details()[0]
     output_data = interpreter.get_tensor(output_details["index"])[0]
 
-    # Dequantize if needed
     if output_details["dtype"] == np.uint8:
         scale, zero_point = output_details.get("quantization", (1.0, 0))
         scores = (output_data.astype(np.float32) - zero_point) * scale
     else:
         scores = output_data.astype(np.float32)
 
-    # Get indices of top k scores
     top_k_indices = np.argsort(scores)[::-1][:top_k]
     return [(i, scores[i]) for i in top_k_indices]
 
@@ -95,10 +128,10 @@ def classify_image(interpreter, top_k=3):
 # Behaviour mapping: what to do for each label
 # ---------------------------------------------------------------------
 
-def handle_prediction(label, score, threshold=0.45):
+def handle_prediction(label, score, threshold):
     """
     Map predicted label + confidence to actions.
-    For now we just print, but you can later connect this to motors.
+    Only act if score >= threshold.
     """
     if score < threshold:
         print(f"Low confidence ({score:.2f}) -> ignore")
@@ -107,11 +140,11 @@ def handle_prediction(label, score, threshold=0.45):
     l = label.lower()
 
     if l == "stop":
-        print("ACTION: STOP car 🚫")
+        print("ACTION: STOP car")
     elif l == "slow":
-        print("ACTION: SLOW DOWN 🐢")
+        print("ACTION: SLOW DOWN")
     elif l == "uturn":
-        print("ACTION: U-TURN ↩️")
+        print("ACTION: U-TURN")
     elif l == "person":
         print("ACTION: PERSON detected -> STOP/SLOW for safety")
     elif l == "background":
@@ -137,8 +170,11 @@ def main():
     labels = load_labels(LABELS_PATH)
     print(f"Loaded {len(labels)} labels:")
     print(labels)
+    print("ROIs:", ROIS)
+    print(f"CONFIDENCE_THRESHOLD = {CONFIDENCE_THRESHOLD}")
+    print(f"BACKGROUND_MARGIN = {BACKGROUND_MARGIN}, SIGN_MIN_SCORE = {SIGN_MIN_SCORE}")
 
-    # 2. Set up PiCamera2 for preview
+    # 2. Set up PiCamera2
     camera = Picamera2()
     preview_config = camera.create_preview_configuration()
     camera.configure(preview_config)
@@ -151,41 +187,94 @@ def main():
 
     try:
         while True:
-            # 3. Capture a frame as a NumPy array (RGB)
+            # 3. Capture a frame (NumPy array, RGB)
             frame = camera.capture_array()  # shape (H, W, 3), RGB
-
-            # Convert to PIL Image for TFLite preprocessing
-            image = Image.fromarray(frame)
-
-            # 4. Run inference
-            set_input_tensor(interpreter, image)
-            results = classify_image(interpreter, top_k=3)
-
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-            if results:
-                # Top result
+            # Convert to PIL Image for cropping
+            image_full = Image.fromarray(frame)
+
+            h, w, _ = frame_bgr.shape
+
+            # best_result: (name, x1, y1, x2, y2, label, score, raw_results)
+            best_result = None
+
+            # ---- Run model on each ROI -----------------------------------
+            for name, x1f, y1f, x2f, y2f in ROIS:
+                # Crop PIL image for this region
+                crop = crop_region(image_full, x1f, y1f, x2f, y2f)
+
+                # Run inference
+                set_input_tensor(interpreter, crop)
+                results = classify_image(interpreter, top_k=3)
+                if not results:
+                    continue
+
+                # ----- Choose label, treating "background" specially -----
+                # Start with top-1 result
                 top_id, top_score = results[0]
                 if 0 <= top_id < len(labels):
                     top_label = labels[top_id]
                 else:
                     top_label = f"Class {top_id}"
 
-                label_text = f"{top_label}: {top_score:.2f}"
+                selected_id = top_id
+                selected_score = top_score
+                selected_label = top_label
 
-                # Call our behaviour function
-                handle_prediction(top_label, top_score)
+                # If top is background but a sign is close behind, prefer the sign
+                if selected_label.lower() == "background" and len(results) > 1:
+                    second_id, second_score = results[1]
+                    if 0 <= second_id < len(labels):
+                        second_label = labels[second_id]
+                    else:
+                        second_label = f"Class {second_id}"
 
-                # Console logging (top-3 once per second)
+                    if (
+                        second_label.lower() != "background"
+                        and second_score >= SIGN_MIN_SCORE
+                        and (selected_score - second_score) < BACKGROUND_MARGIN
+                    ):
+                        # Use the sign instead of background
+                        selected_id = second_id
+                        selected_score = second_score
+                        selected_label = second_label
+
+                # Pixel coordinates for drawing rectangle
+                x1 = int(x1f * w)
+                y1 = int(y1f * h)
+                x2 = int(x2f * w)
+                y2 = int(y2f * h)
+
+                # Draw thin yellow rectangle for this ROI
+                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 1)
+
+                # Keep track of the best-scoring region (after background handling)
+                if (best_result is None) or (selected_score > best_result[6]):
+                    best_result = (name, x1, y1, x2, y2, selected_label, selected_score, results)
+
+            # ---- Use best ROI for display + behaviour --------------------
+            if best_result is not None:
+                name, x1, y1, x2, y2, top_label, top_score, results = best_result
+
+                # Thicker green rectangle around the best ROI
+                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                label_text = f"[{name}] {top_label}: {top_score:.2f}"
+
+                # Behaviour
+                handle_prediction(top_label, top_score, CONFIDENCE_THRESHOLD)
+
+                # Console logging (top-3 for this region once per second)
                 now = time.time()
                 if now - last_print_time >= print_interval:
-                    print("Top predictions:")
+                    print(f"Top predictions in ROI '{name}':")
                     for class_id, score in results:
                         if 0 <= class_id < len(labels):
-                            name = labels[class_id]
+                            pred_name = labels[class_id]
                         else:
-                            name = f"Class {class_id}"
-                        print(f"  {name:30s}  {score:.3f}")
+                            pred_name = f"Class {class_id}"
+                        print(f"  {pred_name:30s}  {score:.3f}")
                     print("-" * 40)
                     last_print_time = now
 
@@ -193,16 +282,16 @@ def main():
                 cv2.putText(
                     frame_bgr,
                     label_text,
-                    (10, 30),  # position (x, y)
+                    (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,              # font scale
-                    (0, 255, 0),      # color (B, G, R) = green
-                    2,                # thickness
+                    0.8,
+                    (0, 255, 0),
+                    2,
                     cv2.LINE_AA
                 )
 
             # 7. Show frame
-            cv2.imshow("PiCar TFLite Traffic Signs", frame_bgr)
+            cv2.imshow("PiCar TFLite Traffic Signs (multi-ROI)", frame_bgr)
 
             # 8. Check for 'q' key to quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
