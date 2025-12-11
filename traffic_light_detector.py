@@ -1,29 +1,48 @@
 # traffic_light_detector.py
+#
+# Separate module to detect traffic-light colour: "RED" / "GREEN" / "NONE"
+# from an RGB numpy array (H x W x 3, uint8).
+#
+# Uses similar HSV conversion conventions as line.py:
+#   H in [0, 360), S, V in [0, 100].
 
 import time
 import numpy as np
-import cv2
 
-# ===================== HSV conversion helper =====================
+# ===================== HSV conversion (copied style from line.py) =====================
 
-def rgb_to_hsv_np(img_rgb):
+def rgb_to_hsv_np(rgb):
     """
-    Convert uint8 RGB image to HSV:
-    - H in degrees [0, 360)
-    - S, V in [0, 255]
+    rgb uint8 -> hsv (H deg 0..360, S% 0..100, V% 0..100), vectorized
     """
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    h = hsv[..., 0].astype(np.float32) * 2.0        # OpenCV: 0..179 -> 0..358
-    s = hsv[..., 1].astype(np.float32)
-    v = hsv[..., 2].astype(np.float32)
+    rgb = rgb.astype(np.float32) / 255.0
+    r, g, b = rgb[...,0], rgb[...,1], rgb[...,2]
+    cmax = np.max(rgb, axis=-1)
+    cmin = np.min(rgb, axis=-1)
+    delta = cmax - cmin + 1e-8
+
+    # Hue
+    h = np.zeros_like(cmax)
+    mask = delta > 1e-8
+    r_eq = (cmax == r) & mask
+    g_eq = (cmax == g) & mask
+    b_eq = (cmax == b) & mask
+    h[r_eq] = (60.0 * ((g[r_eq] - b[r_eq]) / delta[r_eq]) + 360.0) % 360.0
+    h[g_eq] = (60.0 * ((b[g_eq] - r[g_eq]) / delta[g_eq]) + 120.0) % 360.0
+    h[b_eq] = (60.0 * ((r[b_eq] - g[b_eq]) / delta[b_eq]) + 240.0) % 360.0
+
+    # Saturation
+    s = np.zeros_like(cmax)
+    s[mask] = (delta[mask] / cmax[mask]) * 100.0
+
+    # Value
+    v = cmax * 100.0
     return h, s, v
 
-# ===================== Traffic-light detector (stateless core) =====================
+# ===================== Configuration =====================
 
-# Default configuration values (you can override via the class if needed)
-DEFAULT_TL_HOLD_TIME = 1.5          # seconds to hold last seen RED/GREEN
-DEFAULT_TL_MIN_AREA_FRACTION = 0.20 # 20% of ROI area
+DEFAULT_TL_HOLD_TIME = 1.5           # seconds to hold last seen RED/GREEN
+DEFAULT_TL_MIN_AREA_FRACTION = 0.20  # 20% of ROI area (frame centre)
 
 # Hue ranges in degrees [0, 360)
 RED_H_LO_1 = 0.0
@@ -35,8 +54,10 @@ GREEN_H_LO = 60.0       # allow more yellowish greens
 GREEN_H_HI = 170.0      # allow bluish greens
 
 # Minimum saturation & value (brightness) to be considered "coloured"
-TL_S_MIN = 30.0         # lower = more sensitive, but more noise
-TL_V_MIN = 30.0
+TL_S_MIN = 30.0         # in [0, 100]
+TL_V_MIN = 30.0         # in [0, 100]
+
+# ===================== Stateless single-frame detector =====================
 
 def detect_traffic_light_state_once(
     frame_rgb: np.ndarray,
@@ -50,7 +71,7 @@ def detect_traffic_light_state_once(
     frame_rgb : np.ndarray
         RGB image (H x W x 3), dtype uint8.
     area_fraction_threshold : float
-        Minimum fraction of the ROI area that must be red/green to trigger.
+        Minimum fraction of the central ROI area that must be red/green to trigger.
 
     Returns
     -------
@@ -62,7 +83,7 @@ def detect_traffic_light_state_once(
 
     h, w, _ = frame_rgb.shape
 
-    # Large central ROI to include your light in front of the camera
+    # Large central ROI to include traffic light or lamp in front of the camera
     y0 = int(0.05 * h)
     y1 = int(0.95 * h)
     x0 = int(0.10 * w)
@@ -112,7 +133,7 @@ def detect_traffic_light_state_once(
     else:
         return "GREEN"
 
-# ===================== Traffic-light detector (stateful wrapper) =====================
+# ===================== Stateful wrapper with hold time =====================
 
 class TrafficLightDetector:
     """
