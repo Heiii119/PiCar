@@ -6,6 +6,7 @@ Real-time TFLite traffic sign classification on Raspberry Pi using PiCamera2.
 - Overlays the top predicted label and confidence on the video.
 - Prints top-3 predictions to the console once per second.
 - Calls handle_prediction() to map labels to actions (STOP / SLOW / UTURN, etc.).
+- Uses different thresholds for background vs. sign classes.
 """
 
 import os
@@ -24,6 +25,14 @@ from tflite_runtime.interpreter import Interpreter
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "model.tflite")
 LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
+
+# ---------------------------------------------------------------------
+# Per-class threshold settings
+# ---------------------------------------------------------------------
+
+BACKGROUND_LABEL = "background"   # must match the label name in labels.txt
+BACKGROUND_THRESHOLD = 0.95       # only accept background if score >= 0.95
+SIGN_THRESHOLD = 0.40             # accept any non-background sign if score >= 0.40
 
 # ---------------------------------------------------------------------
 # Helper functions
@@ -95,27 +104,23 @@ def classify_image(interpreter, top_k=3):
 # Behaviour mapping: what to do for each label
 # ---------------------------------------------------------------------
 
-def handle_prediction(label, score, threshold=0.6):
+def handle_prediction(label, score):
     """
     Map predicted label + confidence to actions.
-    For now we just print, but you can later connect this to motors.
+    Thresholding is handled BEFORE calling this function.
     """
-    if score < threshold:
-        print(f"Low confidence ({score:.2f}) -> ignore")
-        return
-
     l = label.lower()
 
     if l == "stop":
-        print("ACTION: STOP car 🚫")
+        print(f"ACTION: STOP car  (score={score:.2f})")
     elif l == "slow":
-        print("ACTION: SLOW DOWN 🐢")
+        print(f"ACTION: SLOW DOWN  (score={score:.2f})")
     elif l == "uturn":
-        print("ACTION: U-TURN ↩️")
+        print(f"ACTION: U-TURN  (score={score:.2f})")
     elif l == "person":
-        print("ACTION: PERSON detected -> STOP/SLOW for safety")
+        print(f"ACTION: PERSON detected -> STOP/SLOW for safety (score={score:.2f})")
     elif l == "background":
-        print("No sign detected (background).")
+        print(f"No sign detected (background). (score={score:.2f})")
     else:
         print(f"No specific action mapped for '{label}' (score={score:.2f})")
 
@@ -137,6 +142,7 @@ def main():
     labels = load_labels(LABELS_PATH)
     print(f"Loaded {len(labels)} labels:")
     print(labels)
+    print(f"BACKGROUND_THRESHOLD = {BACKGROUND_THRESHOLD}, SIGN_THRESHOLD = {SIGN_THRESHOLD}")
 
     # 2. Set up PiCamera2 for preview
     camera = Picamera2()
@@ -163,43 +169,73 @@ def main():
 
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
+            chosen_label = None
+            chosen_score = None
+
             if results:
-                # Top result
-                top_id, top_score = results[0]
-                if 0 <= top_id < len(labels):
-                    top_label = labels[top_id]
+                # ----- Decide using different thresholds for background vs signs -----
+                background_score = None
+                best_sign_label = None
+                best_sign_score = -1.0
+
+                for class_id, score in results:
+                    # Map index to label
+                    if 0 <= class_id < len(labels):
+                        label = labels[class_id]
+                    else:
+                        label = f"Class {class_id}"
+
+                    if label.lower() == BACKGROUND_LABEL.lower():
+                        background_score = score
+                    else:
+                        # Track the best non-background (sign) label
+                        if score > best_sign_score:
+                            best_sign_score = score
+                            best_sign_label = label
+
+                # Rule 1: prefer a sign if any sign >= SIGN_THRESHOLD
+                if best_sign_label is not None and best_sign_score >= SIGN_THRESHOLD:
+                    chosen_label = best_sign_label
+                    chosen_score = best_sign_score
+                # Rule 2: otherwise, accept background only if very confident
+                elif background_score is not None and background_score >= BACKGROUND_THRESHOLD:
+                    chosen_label = BACKGROUND_LABEL
+                    chosen_score = background_score
+                # Rule 3: nothing passes thresholds -> no confident detection
                 else:
-                    top_label = f"Class {top_id}"
+                    print("No confident detection (all scores below thresholds).")
 
-                label_text = f"{top_label}: {top_score:.2f}"
+                # ----- Display & behaviour if we chose something -----
+                if chosen_label is not None:
+                    label_text = f"{chosen_label}: {chosen_score:.2f}"
 
-                # Call our behaviour function
-                handle_prediction(top_label, top_score)
+                    # Call behaviour function
+                    handle_prediction(chosen_label, chosen_score)
 
-                # Console logging (top-3 once per second)
-                now = time.time()
-                if now - last_print_time >= print_interval:
-                    print("Top predictions:")
-                    for class_id, score in results:
-                        if 0 <= class_id < len(labels):
-                            name = labels[class_id]
-                        else:
-                            name = f"Class {class_id}"
-                        print(f"  {name:30s}  {score:.3f}")
-                    print("-" * 40)
-                    last_print_time = now
+                    # Console logging (top-3 once per second)
+                    now = time.time()
+                    if now - last_print_time >= print_interval:
+                        print("Top predictions:")
+                        for class_id, score in results:
+                            if 0 <= class_id < len(labels):
+                                name = labels[class_id]
+                            else:
+                                name = f"Class {class_id}"
+                            print(f"  {name:30s}  {score:.3f}")
+                        print("-" * 40)
+                        last_print_time = now
 
-                # Draw overlay text on the frame
-                cv2.putText(
-                    frame_bgr,
-                    label_text,
-                    (10, 30),  # position (x, y)
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,              # font scale
-                    (0, 255, 0),      # color (B, G, R) = green
-                    2,                # thickness
-                    cv2.LINE_AA
-                )
+                    # Draw overlay text on the frame
+                    cv2.putText(
+                        frame_bgr,
+                        label_text,
+                        (10, 30),  # position (x, y)
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,              # font scale
+                        (0, 255, 0),      # color (B, G, R) = green
+                        2,                # thickness
+                        cv2.LINE_AA
+                    )
 
             # 7. Show frame
             cv2.imshow("PiCar TFLite Traffic Signs", frame_bgr)
