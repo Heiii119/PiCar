@@ -3,20 +3,23 @@
 # Separate module to detect traffic-light colour: "RED" / "GREEN" / "NONE"
 # from an RGB numpy array (H x W x 3, uint8).
 #
-# Uses similar HSV conversion conventions as line.py:
-#   H in [0, 360), S, V in [0, 100].
+# It uses BOTH:
+#   - HSV-based detection, and
+#   - Simple RGB-based rules (R >> G,B for RED; G >> R,B for GREEN)
+#
+# and returns a single state, with RED having priority.
 
 import time
 import numpy as np
 
-# ===================== HSV conversion (copied style from line.py) =====================
+# ===================== HSV conversion (same style as line.py) =====================
 
 def rgb_to_hsv_np(rgb):
     """
     rgb uint8 -> hsv (H deg 0..360, S% 0..100, V% 0..100), vectorized
     """
     rgb = rgb.astype(np.float32) / 255.0
-    r, g, b = rgb[...,0], rgb[...,1], rgb[...,2]
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     cmax = np.max(rgb, axis=-1)
     cmin = np.min(rgb, axis=-1)
     delta = cmax - cmin + 1e-8
@@ -41,12 +44,14 @@ def rgb_to_hsv_np(rgb):
 
 # ===================== Configuration =====================
 
-DEFAULT_TL_HOLD_TIME = 1.5           # seconds to hold last seen RED/GREEN
-DEFAULT_TL_MIN_AREA_FRACTION = 0.20  # 20% of ROI area (frame centre)
+DEFAULT_TL_HOLD_TIME = 1.5  # seconds to hold last seen RED/GREEN
 
-# Hue ranges in degrees [0, 360)
+# Keep for compatibility (not used directly in the final logic)
+DEFAULT_TL_MIN_AREA_FRACTION = 0.20
+
+# HSV hue ranges in degrees [0, 360)
 RED_H_LO_1 = 0.0
-RED_H_HI_1 = 30.0       # wider red towards orange
+RED_H_HI_1 = 45.0       # wider towards orange
 RED_H_LO_2 = 330.0
 RED_H_HI_2 = 360.0      # wrap-around red
 
@@ -54,14 +59,26 @@ GREEN_H_LO = 60.0       # allow more yellowish greens
 GREEN_H_HI = 170.0      # allow bluish greens
 
 # Minimum saturation & value (brightness) to be considered "coloured"
-TL_S_MIN = 30.0         # in [0, 100]
-TL_V_MIN = 30.0         # in [0, 100]
+# Lowered to make dimmer / less saturated colours still count.
+TL_S_MIN = 15.0         # in [0, 100]
+TL_V_MIN = 10.0         # in [0, 100]
+
+# Separate area thresholds inside the ROI (fraction of ROI pixels)
+RED_MIN_AREA_FRACTION = 0.05    # 5% of ROI is enough for RED
+GREEN_MIN_AREA_FRACTION = 0.15  # 15% of ROI required for GREEN
+
+# Extra RGB-based rules (channel differences) for robustness
+RED_RGB_MIN = 60        # minimum R value (0..255-ish scaled to 0..100 via V, but we use raw RGB)
+RED_RGB_DELTA = 40      # R must be at least DELTA above G and B
+
+GREEN_RGB_MIN = 60      # minimum G value
+GREEN_RGB_DELTA = 40    # G must be at least DELTA above R and B
 
 # ===================== Stateless single-frame detector =====================
 
 def detect_traffic_light_state_once(
     frame_rgb: np.ndarray,
-    area_fraction_threshold: float = DEFAULT_TL_MIN_AREA_FRACTION,
+    area_fraction_threshold: float = DEFAULT_TL_MIN_AREA_FRACTION,  # kept for API, not used
 ) -> str:
     """
     Stateless, single-frame traffic-light detector.
@@ -71,7 +88,7 @@ def detect_traffic_light_state_once(
     frame_rgb : np.ndarray
         RGB image (H x W x 3), dtype uint8.
     area_fraction_threshold : float
-        Minimum fraction of the central ROI area that must be red/green to trigger.
+        Kept for backward compatibility, but not used directly.
 
     Returns
     -------
@@ -83,7 +100,7 @@ def detect_traffic_light_state_once(
 
     h, w, _ = frame_rgb.shape
 
-    # Large central ROI to include traffic light or lamp in front of the camera
+    # Large central ROI to include the light in front of the camera
     y0 = int(0.05 * h)
     y1 = int(0.95 * h)
     x0 = int(0.10 * w)
@@ -96,22 +113,47 @@ def detect_traffic_light_state_once(
     roi_h, roi_w, _ = roi.shape
     roi_pixels = roi_h * roi_w
 
+    # Split channels (0..255)
+    R = roi[..., 0].astype(np.float32)
+    G = roi[..., 1].astype(np.float32)
+    B = roi[..., 2].astype(np.float32)
+
+    # HSV for hue-based detection
     H, S, V = rgb_to_hsv_np(roi)
 
-    # Valid: reasonably saturated and bright so background doesn't dominate
-    valid = (S >= TL_S_MIN) & (V >= TL_V_MIN)
+    # Valid pixels: bright enough
+    valid = V >= TL_V_MIN
     if np.count_nonzero(valid) < 50:  # very small -> probably just noise
         return "NONE"
 
-    # ----- RED detection with wider hue range -----
-    # Two intervals: [RED_H_LO_1, RED_H_HI_1] and [RED_H_LO_2, RED_H_HI_2]
-    red_mask = valid & (
+    # ----- HSV-based RED & GREEN masks -----
+    hsv_valid = valid & (S >= TL_S_MIN)
+
+    red_hsv_mask = hsv_valid & (
         ((H >= RED_H_LO_1) & (H <= RED_H_HI_1)) |
         ((H >= RED_H_LO_2) & (H <= RED_H_HI_2))
     )
 
-    # ----- GREEN detection with wider hue range -----
-    green_mask = valid & (H >= GREEN_H_LO) & (H <= GREEN_H_HI)
+    green_hsv_mask = hsv_valid & (H >= GREEN_H_LO) & (H <= GREEN_H_HI)
+
+    # ----- RGB-based fallback masks -----
+    # RED: R is high and clearly dominates G & B
+    red_rgb_mask = valid & (
+        (R >= RED_RGB_MIN) &
+        (R >= G + RED_RGB_DELTA) &
+        (R >= B + RED_RGB_DELTA)
+    )
+
+    # GREEN: G is high and clearly dominates R & B
+    green_rgb_mask = valid & (
+        (G >= GREEN_RGB_MIN) &
+        (G >= R + GREEN_RGB_DELTA) &
+        (G >= B + GREEN_RGB_DELTA)
+    )
+
+    # Combine HSV and RGB criteria
+    red_mask = red_hsv_mask | red_rgb_mask
+    green_mask = green_hsv_mask | green_rgb_mask
 
     red_count = int(np.count_nonzero(red_mask))
     green_count = int(np.count_nonzero(green_mask))
@@ -120,18 +162,18 @@ def detect_traffic_light_state_once(
     red_fraction = red_count / roi_pixels
     green_fraction = green_count / roi_pixels
 
-    # Require at least this fraction of the ROI to be red/green
-    if (
-        red_fraction < area_fraction_threshold
-        and green_fraction < area_fraction_threshold
-    ):
-        return "NONE"
+    # --- Decision logic with RED priority ---
 
-    # Decide which colour dominates
-    if red_fraction > green_fraction:
+    # 1) If we see *enough red*, call RED (even if there is some green)
+    if red_fraction >= RED_MIN_AREA_FRACTION:
         return "RED"
-    else:
+
+    # 2) Otherwise, if we see enough green, call GREEN
+    if green_fraction >= GREEN_MIN_AREA_FRACTION:
         return "GREEN"
+
+    # 3) Otherwise, neither colour strong enough
+    return "NONE"
 
 # ===================== Stateful wrapper with hold time =====================
 
@@ -152,6 +194,7 @@ class TrafficLightDetector:
         area_fraction_threshold: float = DEFAULT_TL_MIN_AREA_FRACTION,
     ):
         self.hold_time = hold_time
+        # area_fraction_threshold kept for backwards compatibility
         self.area_fraction_threshold = area_fraction_threshold
 
         self._current_state = "NONE"
@@ -183,7 +226,8 @@ class TrafficLightDetector:
             tnow = time.time()
 
         raw_state = detect_traffic_light_state_once(
-            frame_rgb, area_fraction_threshold=self.area_fraction_threshold
+            frame_rgb,
+            area_fraction_threshold=self.area_fraction_threshold,
         )
 
         if raw_state != "NONE":
