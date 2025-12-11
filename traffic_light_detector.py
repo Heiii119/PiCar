@@ -61,8 +61,8 @@ TL_S_MIN = 15.0         # in [0, 100]
 TL_V_MIN = 10.0         # in [0, 100]
 
 # Separate area thresholds inside the ROI (fraction of ROI pixels)
-RED_MIN_AREA_FRACTION = 0.30    # fraction of ROI for RED
-GREEN_MIN_AREA_FRACTION = 0.15  # fraction of ROI for GREEN
+RED_MIN_AREA_FRACTION = 0.10    # fraction of ROI for RED
+GREEN_MIN_AREA_FRACTION = 0.10  # fraction of ROI for GREEN
 
 # Extra RGB-based rules (channel differences) for robustness
 RED_RGB_MIN = 50        # minimum R value
@@ -99,9 +99,9 @@ def detect_traffic_light_state_once(
 
     # Traffic light ROI: only look in the TOP HALF of the image
     y0 = 0
-    y1 = int(0.5 * h)   # top 50% of the frame
-    x0 = int(0.10 * w)
-    x1 = int(0.90 * w)
+    y1 = int(0.30 * h)    # top 30% of the frame
+    x0 = int(0.30 * w)    # left 30% in from edge
+    x1 = int(0.70 * w)    # right 30% in from edge
     roi = frame_rgb[y0:y1, x0:x1, :]
 
     if roi.size == 0:
