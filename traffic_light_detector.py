@@ -178,9 +178,6 @@ def detect_traffic_light_state_once(
         if green_fraction >= GREEN_MIN_AREA_FRACTION and green_y_mean < 0.6:
             green_strong = True
 
-    # DEBUG (optional – remove later):
-    print("red_frac", red_fraction, "red_y_mean", red_y_mean)
-    print("green_frac", green_fraction, "green_y_mean", green_y_mean)
     # --- 3. Symmetric decision logic: RED and GREEN same priority ---
 
     # Neither colour strong enough in the right vertical region
