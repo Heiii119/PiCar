@@ -34,10 +34,10 @@ LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 DEFAULT_THRESHOLD = 0.40  # used if a class isn't in CLASS_THRESHOLDS
 
 CLASS_THRESHOLDS = {
-    "background": 0.97,  # only accept background if score >= 0.91
-    "stop": 0.025,        # require a bit more confidence for STOP
-    "slow": 0.030,
-    "uturn": 0.040,
+    "background": 0.99,  # only accept background if score >= 0.91
+    "stop": 0.005,        # require a bit more confidence for STOP
+    "slow": 0.005,
+    "uturn": 0.01,
     "person": 0.60,
     # add more classes here if you have them
 }
