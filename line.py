@@ -93,10 +93,6 @@ H_HI_DEG = 50.0
 S_MIN = 70        # 0..100
 V_MIN = 30        # 0..100
 
-# For traffic light detection
-# Car will stay stopped once it sees RED, until it sees GREEN
-stopped_for_red = False
-
 # ------------------------------
 # Utility: PCA9685 helper
 # ------------------------------
@@ -533,80 +529,80 @@ class LineFollowerDiscrete:
 
     # ------------- Control loop -------------
     def control_loop(self):
-    next_t = time.time()
-    loops = 0
-    while self.running and (MAX_LOOPS is None or loops < MAX_LOOPS):
-        tnow = time.time()
+        next_t = time.time()
+        loops = 0
+        while self.running and (MAX_LOOPS is None or loops < MAX_LOOPS):
+            tnow = time.time()
 
-        # Perception
-        frame = self.camera.get_frame()
-        if frame is not None:
-            # >>> Traffic light detection on full RGB frame <<<
-            self.traffic_state = self.tl_detector.update(frame, tnow)
+            # Perception
+            frame = self.camera.get_frame()
+            if frame is not None:
+                # >>> Traffic light detection on full RGB frame <<<
+                self.traffic_state = self.tl_detector.update(frame, tnow)
 
-            # >>> NEW: stop-until-green latch logic <<<
-            if self.traffic_state == "RED":
-                # Saw RED: latch stop state
-                self.stopped_for_red = True
-            elif self.traffic_state == "GREEN":
-                # Saw GREEN: release stop and allow motion
-                self.stopped_for_red = False
-            # >>> END NEW <<<
+                # >>> NEW: stop-until-green latch logic <<<
+                if self.traffic_state == "RED":
+                    # Saw RED: latch stop state
+                    self.stopped_for_red = True
+                elif self.traffic_state == "GREEN":
+                    # Saw GREEN: release stop and allow motion
+                    self.stopped_for_red = False
+                # >>> END NEW <<<
 
-            # Downscale by striding for line detection
-            scale_y = frame.shape[0] / IMAGE_H
-            scale_x = frame.shape[1] / IMAGE_W
-            small = frame[::int(max(1, round(scale_y))), ::int(max(1, round(scale_x))), :]
-            small = small[:IMAGE_H, :IMAGE_W, :]
-            if small.shape[0] != IMAGE_H or small.shape[1] != IMAGE_W:
-                pad_y = IMAGE_H - small.shape[0]
-                pad_x = IMAGE_W - small.shape[1]
-                small = np.pad(small, ((0, max(0, pad_y)), (0, max(0, pad_x)), (0,0)), mode='edge')
+                # Downscale by striding for line detection
+                scale_y = frame.shape[0] / IMAGE_H
+                scale_x = frame.shape[1] / IMAGE_W
+                small = frame[::int(max(1, round(scale_y))), ::int(max(1, round(scale_x))), :]
                 small = small[:IMAGE_H, :IMAGE_W, :]
+                if small.shape[0] != IMAGE_H or small.shape[1] != IMAGE_W:
+                    pad_y = IMAGE_H - small.shape[0]
+                    pad_x = IMAGE_W - small.shape[1]
+                    small = np.pad(small, ((0, max(0, pad_y)), (0, max(0, pad_x)), (0,0)), mode='edge')
+                    small = small[:IMAGE_H, :IMAGE_W, :]
 
-            y0, y1 = roi_slice(IMAGE_H, ROI_FRACTION)
-            roi_rgb = small[y0:y1, :, :]
+                y0, y1 = roi_slice(IMAGE_H, ROI_FRACTION)
+                roi_rgb = small[y0:y1, :, :]
 
-            if self.mode == "gray":
-                gray = to_gray_norm(small)
-                roi_gray = gray[y0:y1, :]
-                mask = binary_threshold(roi_gray, BIN_THRESH, invert=not LINE_IS_DARK)
-            else:
-                mask = hsv_band_mask(roi_rgb, self.h_lo_deg, self.h_hi_deg, self.s_min, self.v_min)
+                if self.mode == "gray":
+                    gray = to_gray_norm(small)
+                    roi_gray = gray[y0:y1, :]
+                    mask = binary_threshold(roi_gray, BIN_THRESH, invert=not LINE_IS_DARK)
+                else:
+                    mask = hsv_band_mask(roi_rgb, self.h_lo_deg, self.h_hi_deg, self.s_min, self.v_min)
 
-            # Light 1D majority filter horizontally
-            pad = np.pad(mask, ((0,0),(1,1)), mode='edge')
-            conv = (pad[:,0:-2] + pad[:,1:-1] + pad[:,2:]) >= 2
-            mask = conv.astype(np.uint8)
+                # Light 1D majority filter horizontally
+                pad = np.pad(mask, ((0,0),(1,1)), mode='edge')
+                conv = (pad[:,0:-2] + pad[:,1:-1] + pad[:,2:]) >= 2
+                mask = conv.astype(np.uint8)
 
-            center_norm, curvature = find_line_center(mask)
-            if center_norm is not None:
-                self.last_line_time = tnow
-                self.last_center_err = center_norm
-                self.last_curvature = curvature
-                # Clear reverse-search timers/phases on re-acquire
-                self.no_line_start_time = None
-                self.no_line_phase = "idle"
-                self.no_line_phase_start = None
+                center_norm, curvature = find_line_center(mask)
+                if center_norm is not None:
+                    self.last_line_time = tnow
+                    self.last_center_err = center_norm
+                    self.last_curvature = curvature
+                    # Clear reverse-search timers/phases on re-acquire
+                    self.no_line_start_time = None
+                    self.no_line_phase = "idle"
+                    self.no_line_phase_start = None
 
-        # Drive
-        spwm, tpwm = self.compute_and_drive_discrete(tnow)
+            # Drive
+            spwm, tpwm = self.compute_and_drive_discrete(tnow)
 
-        # Recording
-        if self.recording and frame is not None:
-            self.save_sample(frame, spwm, tpwm, tnow)
+            # Recording
+            if self.recording and frame is not None:
+                self.save_sample(frame, spwm, tpwm, tnow)
 
-        # Pace loop
-        next_t += self.ctrl_period
-        delay = next_t - time.time()
-        if delay > 0:
-            time.sleep(delay)
+            # Pace loop
+            next_t += self.ctrl_period
+            delay = next_t - time.time()
+            if delay > 0:
+                time.sleep(delay)
 
-        # Perf counters
-        self.ctrl_count += 1
-        loops += 1
+            # Perf counters
+            self.ctrl_count += 1
+            loops += 1
 
-    self.running = False
+        self.running = False
 
     # ------------- Discrete controller -------------
     def compute_and_drive_discrete(self, tnow):
