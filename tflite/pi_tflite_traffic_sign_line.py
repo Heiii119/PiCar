@@ -75,10 +75,10 @@ SIGN_LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")     # adjust if needed
 DEFAULT_SIGN_THRESHOLD = 0.40
 SIGN_CLASS_THRESHOLDS = {
     "background": 0.9,
-    "stop": 0.40,
+    "stop": 0.30,
     "slow": 0.30,
-    "uturn": 0.40,
-    "tf_red": 0.70,
+    "uturn": 0.60,
+    "tf_red": 0.50,
     "tf_green": 0.40,
 }
 
