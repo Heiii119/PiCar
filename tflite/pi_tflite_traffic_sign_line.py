@@ -47,7 +47,7 @@ PWM_STEERING_THROTTLE = {
     "PWM_THROTTLE_INVERTED": False,
     "STEERING_LEFT_PWM": 280,
     "STEERING_RIGHT_PWM": 480,
-    "THROTTLE_FORWARD_PWM": 393,
+    "THROTTLE_FORWARD_PWM": 420,
     "THROTTLE_STOPPED_PWM": 370,
     "THROTTLE_REVERSE_PWM": 330,  # updated per request
 }
@@ -633,10 +633,10 @@ class LineFollowerDiscrete:
             elif ch in (ord('p'), ord('P')):
                 self.msg = f"Decision={self.last_decision}, err={self.last_center_err:+.3f}"
             elif ch in (ord('w'), ord('W'), curses.KEY_UP):
-                self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 10)
+                self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 5)
                 self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
             elif ch in (ord('s'), ord('S'), curses.KEY_DOWN):
-                self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 10)
+                self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 5)
                 self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
             elif ch in (curses.KEY_LEFT,):
                 self.manual_steer_pwm = self.cfg["STEERING_LEFT_PWM"]
