@@ -33,6 +33,10 @@ import board
 import busio
 from adafruit_pca9685 import PCA9685
 
+# Traffic sign classifier
+from PIL import Image
+from tflite_runtime.interpreter import Interpreter
+
 # ------------------------------
 # Configuration
 # ------------------------------
@@ -48,6 +52,39 @@ PWM_STEERING_THROTTLE = {
     "THROTTLE_REVERSE_PWM": 330,  # updated per request
 }
 
+# ------------------------------
+# Traffic sign / light modes
+# ------------------------------
+MODE_LINE      = "line"
+MODE_SLOW      = "slow"
+MODE_STOP_SIGN = "stop_sign"
+MODE_WAIT_RED  = "wait_red"
+MODE_UTURN     = "uturn"
+
+# Sign-based throttle overrides
+SLOW_THROTTLE_PWM  = 385   # when "slow" sign detected
+UTURN_THROTTLE_PWM = 395   # when doing U-turn
+
+# ------------------------------
+# Sign classifier paths & thresholds
+# ------------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SIGN_MODEL_PATH  = os.path.join(SCRIPT_DIR, "model.tflite")   # adjust if needed
+SIGN_LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")     # adjust if needed
+
+DEFAULT_SIGN_THRESHOLD = 0.40
+SIGN_CLASS_THRESHOLDS = {
+    "background": 0.9,
+    "stop": 0.40,
+    "slow": 0.30,
+    "uturn": 0.40,
+    "tf_red": 0.70,
+    "tf_green": 0.40,
+}
+
+# ------------------------------
+# Discrete line follower params
+# ------------------------------
 # Discrete decision thresholds (normalized error in [-1,1])
 DEAD_BAND_ON = 0.14   # must exceed this to ENTER a turn
 DEAD_BAND_OFF = 0.08  # must fall within this to EXIT a turn (hysteresis)
@@ -138,6 +175,75 @@ class MotorServoController:
         self.stop()
         time.sleep(0.1)
         self.pca.deinit()
+
+# ------------------------------
+# Traffic sign classifier helpers (TFLite)
+# ------------------------------
+def sign_load_labels(path):
+    labels = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(" ", 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                line = parts[1]
+            labels.append(line)
+    return labels
+
+def sign_set_input_tensor(interpreter, image):
+    input_details = interpreter.get_input_details()[0]
+    height, width = input_details["shape"][1], input_details["shape"][2]
+
+    image = image.convert("RGB").resize((width, height), Image.BILINEAR)
+    input_data = np.array(image)
+    input_data = np.expand_dims(input_data, axis=0)
+
+    if input_details["dtype"] == np.uint8:
+        input_data = input_data.astype(np.uint8)
+    else:
+        input_data = input_data.astype(np.float32) / 255.0
+
+    interpreter.set_tensor(input_details["index"], input_data)
+
+def sign_classify_top_k(interpreter, top_k=3):
+    interpreter.invoke()
+    output_details = interpreter.get_output_details()[0]
+    output_data = interpreter.get_tensor(output_details["index"])[0]
+
+    if output_details["dtype"] == np.uint8:
+        scale, zero_point = output_details.get("quantization", (1.0, 0))
+        scores = (output_data.astype(np.float32) - zero_point) * scale
+    else:
+        scores = output_data.astype(np.float32)
+
+    top_k_indices = np.argsort(scores)[::-1][:top_k]
+    return [(i, scores[i]) for i in top_k_indices]
+
+def sign_select_best_label(results, labels):
+    if not results:
+        return None, None
+
+    best_label = None
+    best_score = -1.0
+
+    for class_id, score in results:
+        if 0 <= class_id < len(labels):
+            label = labels[class_id]
+        else:
+            continue
+
+        key = label.lower()
+        threshold = SIGN_CLASS_THRESHOLDS.get(key, DEFAULT_SIGN_THRESHOLD)
+
+        if score >= threshold and score > best_score:
+            best_score = score
+            best_label = label
+
+    if best_label is None:
+        return None, None
+    return best_label, best_score
 
 # ------------------------------
 # Camera helper
@@ -388,6 +494,34 @@ class LineFollowerDiscrete:
         self.no_line_phase = "idle"           # "idle" | "neutral" | "reverse"
         self.no_line_phase_start = None
 
+        # --- Traffic sign / light state machine ---
+        self.current_mode = MODE_LINE   # current high-level mode
+        self.mode_until   = 0.0         # time until which timed modes are active
+
+        # How often to run sign classifier (seconds)
+        self.last_sign_check     = 0.0
+        self.sign_check_interval = 0.3   # run sign detection at ~3–4 Hz
+
+        # Sign classifier (TFLite)
+        self.sign_interpreter = None
+        self.sign_labels = None
+        self._init_sign_classifier()
+
+    # ------------- Sign classifier init -------------
+    def _init_sign_classifier(self):
+        try:
+            if not (os.path.exists(SIGN_MODEL_PATH) and os.path.exists(SIGN_LABELS_PATH)):
+                self.msg = "Sign model/labels not found -> traffic signs disabled"
+                return
+            self.sign_interpreter = Interpreter(model_path=SIGN_MODEL_PATH)
+            self.sign_interpreter.allocate_tensors()
+            self.sign_labels = sign_load_labels(SIGN_LABELS_PATH)
+            self.msg = f"Loaded sign model with {len(self.sign_labels)} labels"
+        except Exception as e:
+            self.msg = f"Sign classifier init failed: {e}"
+            self.sign_interpreter = None
+            self.sign_labels = None
+
     # ------------- Lifecycle -------------
     def start(self):
         self.camera.start()
@@ -527,7 +661,12 @@ class LineFollowerDiscrete:
             # Perception
             frame = self.camera.get_frame()
             if frame is not None:
-                # Downscale by striding
+                # --- Traffic sign check (not every control tick) ---
+                if (tnow - self.last_sign_check) >= self.sign_check_interval:
+                    self.last_sign_check = tnow
+                    self.check_traffic_signs(frame, tnow)
+
+                # Downscale by striding for line detection
                 scale_y = frame.shape[0] / IMAGE_H
                 scale_x = frame.shape[1] / IMAGE_W
                 small = frame[::int(max(1, round(scale_y))), ::int(max(1, round(scale_x))), :]
@@ -684,9 +823,120 @@ class LineFollowerDiscrete:
             k = 1.0 - CURVE_SLOWDOWN_GAIN * curve_mag
             throttle_pwm = int(np.interp(k, [0.0, 1.0], [stop_pwm, fwd_pwm]))
 
-        spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm)
-        tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, throttle_pwm)
+        # Apply traffic sign / light modes on top of line-following
+        steer_pwm_final, throttle_pwm_final = self.apply_sign_mode(steer_pwm, throttle_pwm, tnow)
+
+        spwm = self.motors.set_pwm_raw(self.motors.channel_steer, steer_pwm_final)
+        tpwm = self.motors.set_pwm_raw(self.motors.channel_throttle, throttle_pwm_final)
         return spwm, tpwm
+
+    # ------------- Traffic sign integration -------------
+    def check_traffic_signs(self, frame_rgb, tnow):
+        """
+        Run the sign classifier on the current RGB frame and update mode.
+        """
+        if self.sign_interpreter is None or self.sign_labels is None:
+            return
+
+        # Center-crop (digital zoom) to make distant signs larger
+        h, w, _ = frame_rgb.shape
+        CROP_FRACTION = 0.6  # 60% centre region
+        cw = int(w * CROP_FRACTION)
+        ch = int(h * CROP_FRACTION)
+        x1 = (w - cw) // 2
+        y1 = (h - ch) // 2
+        x2 = x1 + cw
+        y2 = y1 + ch
+        crop = frame_rgb[y1:y2, x1:x2, :]
+
+        image = Image.fromarray(crop)
+        sign_set_input_tensor(self.sign_interpreter, image)
+        results = sign_classify_top_k(self.sign_interpreter, top_k=3)
+
+        label, score = sign_select_best_label(results, self.sign_labels)
+        if label is None:
+            return
+
+        self.on_sign_detected(label, score, tnow)
+# edit the name to match the labels
+    def on_sign_detected(self, label, score, tnow):
+        """
+        Map detected label to high-level mode changes.
+        STOP: stop 10 s
+        RED: wait until GREEN
+        SLOW: slow mode (fixed throttle)
+        UTURN: hard-right + fixed throttle for 10 s
+        """
+        l = label.lower()
+
+        if l == "stop":
+            self.msg = f"STOP sign ({score:.2f}) -> stop 10 s"
+            self.current_mode = MODE_STOP_SIGN
+            self.mode_until   = tnow + 10.0
+
+        elif l in ("tf_red"):
+            self.msg = f"RED light ({score:.2f}) -> wait for GREEN"
+            self.current_mode = MODE_WAIT_RED
+            # no timer; wait for green
+
+        elif l in ("tl_green"):
+            if self.current_mode == MODE_WAIT_RED:
+                self.msg = f"GREEN light ({score:.2f}) -> resume line"
+                self.current_mode = MODE_LINE
+                self.mode_until   = 0.0
+
+        elif l == "slow":
+            self.msg = f"SLOW sign ({score:.2f}) -> slow mode"
+            self.current_mode = MODE_SLOW
+            # Optionally use timer:
+            # self.mode_until = tnow + 5.0
+
+        elif l == "uturn":
+            if self.current_mode != MODE_UTURN:
+                self.msg = f"UTURN sign ({score:.2f}) -> U-turn 10 s"
+                self.current_mode = MODE_UTURN
+                self.mode_until   = tnow + 10.0
+
+    def apply_sign_mode(self, steer_pwm_line, throttle_pwm_line, tnow):
+        """
+        Given the steering/throttle that line-following wants,
+        override them according to current_mode (STOP, SLOW, WAIT_RED, UTURN).
+        """
+        cfg = self.cfg
+        stop_pwm    = cfg["THROTTLE_STOPPED_PWM"]
+        left_pwm    = cfg["STEERING_LEFT_PWM"]
+        right_pwm   = cfg["STEERING_RIGHT_PWM"]
+        center_pwm  = int(round((left_pwm + right_pwm) / 2))
+
+        # Handle timed modes expiring
+        if self.current_mode in (MODE_STOP_SIGN, MODE_UTURN, MODE_SLOW) and self.mode_until > 0.0:
+            if tnow >= self.mode_until:
+                self.msg = f"Mode {self.current_mode} finished -> LINE"
+                self.current_mode = MODE_LINE
+                self.mode_until   = 0.0
+
+        # Decide outputs by mode
+        if self.current_mode == MODE_LINE:
+            final_steer   = steer_pwm_line
+            final_throttle = throttle_pwm_line
+
+        elif self.current_mode == MODE_SLOW:
+            final_steer   = steer_pwm_line
+            final_throttle = SLOW_THROTTLE_PWM
+
+        elif self.current_mode == MODE_STOP_SIGN or self.current_mode == MODE_WAIT_RED:
+            final_steer   = steer_pwm_line  # or center_pwm
+            final_throttle = stop_pwm
+
+        elif self.current_mode == MODE_UTURN:
+            final_steer   = right_pwm
+            final_throttle = UTURN_THROTTLE_PWM
+
+        else:
+            final_steer   = steer_pwm_line
+            final_throttle = throttle_pwm_line
+
+        return final_steer, final_throttle
 
     # ------------- Recording -------------
     def _start_recording(self):
@@ -724,31 +974,37 @@ class LineFollowerDiscrete:
             self.stdscr.addstr(6, 0, f"Error (norm) : {self.last_center_err:+.3f}")
             self.stdscr.addstr(7, 0, f"Curvature    : {self.last_curvature:+.4f}")
 
+            # Sign mode status
+            rem = 0.0
+            if self.mode_until > 0.0 and self.current_mode in (MODE_STOP_SIGN, MODE_SLOW, MODE_UTURN):
+                rem = max(0.0, self.mode_until - time.time())
+            self.stdscr.addstr(8, 0, f"Sign mode    : {self.current_mode}  (rem: {rem:4.1f}s)")
+
             # PWM outputs (manual shown in MANUAL, target in AUTO)
             if self.auto_mode:
-                self.stdscr.addstr(9, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
+                self.stdscr.addstr(10, 0, f"AUTO Target PWMs -> steer: {self._target_steer_pwm_str():>4} | throttle: {self._target_throttle_pwm_str():>4}")
             else:
-                self.stdscr.addstr(9, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
+                self.stdscr.addstr(10, 0, f"MANUAL PWMs     -> steer: {self.manual_steer_pwm:>4} | throttle: {self.manual_throttle_pwm:>4}")
 
             # ROI/Thresholds
-            self.stdscr.addstr(11, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
+            self.stdscr.addstr(12, 0, f"ROI Fraction : {ROI_FRACTION[0]:.2f}..{ROI_FRACTION[1]:.2f}   BIN_THRESH: {BIN_THRESH:.2f}   LINE_IS_DARK: {LINE_IS_DARK}")
 
             # Perf (rough estimates)
             now = time.time()
             ctrl_fps = self.ctrl_count / max(1e-3, (now - self.ctrl_t0))
             self.ctrl_count = 0
             self.ctrl_t0 = now
-            self.stdscr.addstr(13, 0, f"Control loop target: {CONTROL_LOOP_HZ} Hz | est: {ctrl_fps:5.1f} Hz")
-            self.stdscr.addstr(14, 0, f"Camera target: {CAMERA_LOOP_HZ} Hz   | (Picamera2 internal)")
+            self.stdscr.addstr(14, 0, f"Control loop target: {CONTROL_LOOP_HZ} Hz | est: {ctrl_fps:5.1f} Hz")
+            self.stdscr.addstr(15, 0, f"Camera target: {CAMERA_LOOP_HZ} Hz   | (Picamera2 internal)")
 
             # Controls help
-            self.stdscr.addstr(16, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
+            self.stdscr.addstr(17, 0, "Keys: h manual | a auto | r record | space stop | c center | p status | arrows/WASD manual | q quit")
             if self.mode == "color":
-                self.stdscr.addstr(17, 0, "Tip: run with --calibrate to quickly set HSV band from ROI")
+                self.stdscr.addstr(18, 0, "Tip: run with --calibrate to quickly set HSV band from ROI")
 
             # Message line
             if self.msg:
-                self.stdscr.addstr(19, 0, f"Msg: {self.msg}".ljust(cols-1))
+                self.stdscr.addstr(20, 0, f"Msg: {self.msg}".ljust(cols-1))
 
             self.stdscr.refresh()
         except curses.error:
