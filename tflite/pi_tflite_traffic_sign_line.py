@@ -62,8 +62,8 @@ MODE_WAIT_RED  = "wait_red"
 MODE_UTURN     = "uturn"
 
 # Sign-based throttle overrides
-SLOW_THROTTLE_PWM  = 385   # when "slow" sign detected
-UTURN_THROTTLE_PWM = 395   # when doing U-turn
+SLOW_THROTTLE_PWM  = 395   # when "slow" sign detected
+UTURN_THROTTLE_PWM = 420   # when doing U-turn
 
 # ------------------------------
 # Sign classifier paths & thresholds
@@ -889,7 +889,7 @@ class LineFollowerDiscrete:
             self.msg = f"SLOW sign ({score:.2f}) -> slow mode"
             self.current_mode = MODE_SLOW
             # Optionally use timer:
-            # self.mode_until = tnow + 5.0
+            self.mode_until = tnow + 5.0
 
         elif l == "uturn":
             if self.current_mode != MODE_UTURN:
