@@ -53,120 +53,37 @@ wget \
   -O labels.txt
 ```
 
-### install tensorflow (no need now)
-for Python 3.7.3 on Raspbian Buster. 
-- Use a fresh virtualenv Avoid the piwheels hash issue
-- Pins: numpy==1.19.5, h5py==2.10.0 (TF 2.4-friendly)
-- Uses piwheels and disables cache to avoid mirror/hash mismatches
-- Preinstalls scikit-build to satisfy builds when using --no-build-isolation
-- Install Donkeycar 4.5.1 and TensorFlow 2.4.0 (cp37/armv7l)
-
-Step 0: System prep
+## Install and setup Tailscale
+### 1. on the Raspberry Pi: 
 ```bash
-sudo apt update
-sudo apt install -y python3-venv libatlas-base-dev libhdf5-103 libhdf5-dev cmake ninja-build git
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+- A URL will appear in the terminal.
+- Open that URL in a browser (on any device), log in, and approve the Pi.
+- After that, run:
+```bash
+tailscale ip
+# You should see an IP like 100.x.y.z. That is the Pi’s Tailscale IP.
+```
+### 2. on your computer or phone or other device:
+- Install the Tailscale app (iOS App Store / Google Play).
+- Log in with the same account.
+- Connect to the Tailscale network.
+
+### 3. run the program on Pi
+```bash
+python3 web_car_control.py
 ```
 
-Step 1: Create and activate a clean virtualenv 
+### 4. connect to the pi on your device:
+- Open the Tailscale app → ensure it’s connected.
+- Open the browser app (Safari, Chrome, etc.).
 ```bash
-python3 -m venv ~/dkc451
-source ~/dkc451/bin/activate
+http://<Pi_Tailscale_IP>:5000
 ```
 
-Step 2: Upgrade pip (keep a 3.7-compatible version) and clear cache
-```bash
-python -m pip install --upgrade "pip<24" setuptools wheel
-python -m pip cache purge
-unset PIP_REQUIRE_HASHES 2>/dev/null || true
-```
-
-Step 3: Get Donkeycar 4.5.1 (done)
-```bash
-git clone https://github.com/autorope/donkeycar
-cd donkeycar
-git fetch --all --tags -f
-git checkout 4.5.1
-```
-
-Step 4: Create version constraints for TF 2.4 
-```bash
-printf "numpy==1.19.5\nh5py<3\n" > constraints.txt
-```
-
-Step 5: Preinstall pinned numpy and h5py from piwheels (wheels only, no cache) 
-
-```bash
-python -m pip install --no-cache-dir --only-binary=:all: --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple -c constraints.txt numpy==1.19.5 h5py==2.10.0
-```
-Preinstall build helper (prevents “No module named skbuild” with --no-build-isolation)
-```bash
-python -m pip install --no-cache-dir "scikit-build<0.18"
-```
-If a package insists on building and fails, try wheels-only to identify the culprit:
-This is to check if everything has wheels. 
-If it succeeds, you’re done and can skip step 6.
-
-```bash
-python -m pip install --only-binary=:all: -e .[pi] --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
-```
-
-
-Step 6: Install Donkeycar (editable) with Pi extras, no build isolation, respecting constraints 
-```bash
-python -m pip install --no-cache-dir --no-build-isolation -e .[pi] -c constraints.txt --index-url https://www.piwheels.org/simple --extra-index-url https://pypi.org/simple
-```
-
-Step 7:Install TensorFlow 2.4.0 (cp37, armv7l) 
-```bash
-python -m pip install --no-cache-dir https://github.com/lhelontra/tensorflow-on-arm/releases/download/v2.4.0/tensorflow-2.4.0-cp37-none-linux_armv7l.whl
-```
-
-Quick verification
-verify the tensorflow install:
-```bash
-python -c "import tensorflow; print(tensorflow.__version__)"
-```
-```bash
-python - <<'PY' import sys, numpy as np import tensorflow as tf print(sys.version) print("numpy:", np.version) print("tensorflow:", tf.version) print("tf test:", tf.reduce_sum(tf.constant([[1.0,2.0],[3.0,4.0]])).numpy()) PY
-````
-
-Troubleshooting (only if needed)
-
-Hash mismatch from piwheels:
-Ensure you used --no-cache-dir and the explicit --index-url https://www.piwheels.org/simple
-```bash
-python -m pip cache purge
-unset PIP_REQUIRE_HASHES
-grep -nR 'numpy==1.19' setup.* setup.cfg pyproject.toml requirements || true
-sed -i 's/numpy==1.19\b/numpy==1.19.5/g' setup.py 2>/dev/null || true
-sed -i 's/numpy==1.19\b/numpy==1.19.5/g' setup.cfg 2>/dev/null || true
-```
-If piwheels keeps failing for h5py, build from PyPI (slower):
-```bash
-python -m pip install --no-cache-dir --no-binary=:all: --index-url https://pypi.org/simple "h5py==2.10.0"
-```
-Then re-run step 6.
-
-Notes and tips:
-Always use python -m pip inside the venv to avoid calling a system pip by mistake.
-If the sed commands don’t find anything to change, tell me what grep printed and I’ll adjust the one-liner.
-If you ever see the hash mismatch again, keep using --no-cache-dir and the explicit --index-url https://www.piwheels.org/simple flags.
-
-Why edit the pin? Donkeycar 4.5.1 pins numpy==1.19.0, but TF 2.4.x requires numpy >= 1.19.2. Moving to 1.19.5 keeps both happy.
-Hash mismatch fix: using the main piwheels index plus --no-cache-dir avoids stale/mirrored files (the “archive1” hash you saw).
-If you still see “hashes do not match”:
-Ensure no global hash enforcement is set: echo $PIP_REQUIRE_HASHES; if set, run: unset PIP_REQUIRE_HASHES
-Re-run installs with --no-cache-dir and the explicit --index-url shown above
-If TF import complains about missing BLAS/HDF5 at runtime, install:
-sudo apt install -y libhdf5-103 libhdf5-dev
-Alternative (no file edits): install Donkeycar without deps, then manage deps yourself with numpy==1.19.5
-
-python -m pip install -e . --no-deps
-Then add its extras piece by piece (excluding numpy) or from its requirements after changing the numpy pin there. This is more manual; the edit approach above is simpler.
-
-## set up on computer
-
-https://docs.donkeycar.com/guide/create_application/
+Enter the same URL:
 
 # PiCam RGB/HSV Tools (No OpenCV)
 
