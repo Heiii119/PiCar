@@ -57,7 +57,7 @@ wget \
 ### 1. on the Raspberry Pi: 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
+sudo tailscale up #login
 ```
 - A URL will appear in the terminal.
 - Open that URL in a browser (on any device), log in, and approve the Pi.
@@ -65,6 +65,11 @@ sudo tailscale up
 ```bash
 tailscale ip
 # You should see an IP like 100.x.y.z. That is the Pi’s Tailscale IP.
+```
+if tailscale is not activate
+```bash
+sudo systemctl enable tailscaled
+sudo systemctl start tailscaled
 ```
 ### 2. on your computer or phone or other device:
 - Install the Tailscale app (iOS App Store / Google Play).
