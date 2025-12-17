@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Meta Dot PiCar - Web Line Follower + Manual Control + Color Calibration
+PiCar - Web Line Follower + Manual Control + Color Calibration
 
 - Integrates the discrete line follower logic from line.py
 - Supports GRAY or COLOR (HSV band) line detection
@@ -591,19 +591,21 @@ class WebLineFollower:
             self._apply_manual_pwm()
             self.msg = "Manual: stop"
 
-    def manual_throttle_up(self):
+    def auto_throttle_up(self):
         with self.state_lock:
-            self.auto_mode = False
-            self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 5)
-            self._apply_manual_pwm()
-            self.msg = f"Manual throttle up -> {self.manual_throttle_pwm}"
+            #self.auto_mode = False
+            self.cfg["THROTTLE_FORWARD_PWM"] = min(
+                4095, self.cfg["THROTTLE_FORWARD_PWM"] + 5
+            )
+            self.msg = f"AUTO forward PWM -> {self.cfg['THROTTLE_FORWARD_PWM']}"
 
-    def manual_throttle_down(self):
+    def auto_throttle_down(self):
         with self.state_lock:
-            self.auto_mode = False
-            self.manual_throttle_pwm = max(0, self.manual_throttle_pwm - 5)
-            self._apply_manual_pwm()
-            self.msg = f"Manual throttle down -> {self.manual_throttle_pwm}"
+            #self.auto_mode = False
+            self.cfg["THROTTLE_FORWARD_PWM"] = max(
+                0, self.cfg["THROTTLE_FORWARD_PWM"] - 5
+            )
+            self.msg = f"AUTO forward PWM -> {self.cfg['THROTTLE_FORWARD_PWM']}"
 
     def _apply_manual_pwm(self):
         self.motors.set_pwm_raw(self.motors.channel_steer,
@@ -1115,10 +1117,10 @@ HTML_TEMPLATE = """
       <button class="btn" name="action" value="center">Center Steering</button>
     </form>
     <form method="post" action="{{ url_for('cmd') }}" style="display:inline;">
-      <button class="btn" name="action" value="throttle_up">Throttle +</button>
+      <button class="btn" name="action" value="auto_throttle_up">Throttle +</button>
     </form>
     <form method="post" action="{{ url_for('cmd') }}" style="display:inline;">
-      <button class="btn" name="action" value="throttle_down">Throttle -</button>
+      <button class="btn" name="action" value="auto_throttle_down">Throttle -</button>
     </form>
   </div>
 
@@ -1168,10 +1170,10 @@ def cmd():
         lf.manual_stop()
     elif action == "center":
         lf.center_steering()
-    elif action == "throttle_up":
-        lf.manual_throttle_up()
-    elif action == "throttle_down":
-        lf.manual_throttle_down()
+    elif action == "auto_throttle_up":
+        lf.auto_throttle_up()
+    elif action == "auto_throttle_down":
+        lf.auto_throttle_down()
 
     return redirect(url_for("index"))
 
