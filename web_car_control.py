@@ -441,7 +441,7 @@ class WebLineFollower:
                                    vflip=CAMERA_VFLIP)
 
         self.running = False
-        self.auto_mode = True
+        self.auto_mode = False
         self.recording = False
 
         self.last_line_time = 0.0
@@ -457,7 +457,7 @@ class WebLineFollower:
         self.manual_steer_pwm = self.motors.steering_center_pwm()
         self.manual_throttle_pwm = self.cfg["THROTTLE_STOPPED_PWM"]
 
-        self.msg = ""
+        self.msg = "Startup: MANUAL, car stopped. Press 'AUTO (Line Follower)' to start."
 
         # Reverse search state
         self.no_line_start_time = None
@@ -555,9 +555,9 @@ class WebLineFollower:
         with self.state_lock:
             self.auto_mode = False
             self.manual_steer_pwm = self.motors.steering_center_pwm()
-            self.manual_throttle_pwm = self.cfg["THROTTLE_FORWARD_PWM"]
+            self.manual_throttle_pwm = min(4095, self.manual_throttle_pwm + 5)
             self._apply_manual_pwm()
-            self.msg = "Manual: forward"
+            self.msg = f"Manual throttle PWM {self.manual_throttle_pwm}"
 
     def manual_reverse(self):
         with self.state_lock:
