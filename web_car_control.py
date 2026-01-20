@@ -996,7 +996,7 @@ HTML_TEMPLATE = """
   </style>
 </head>
 <body>
-  <h1>Meta Dot PiCar - Web Line Follower</h1>
+  <h1>PiCar - Web Line Follower</h1>
 
   <h2>Camera Preview</h2>
   <img id="video" src="{{ url_for('video_feed') }}" width="640" height="480" />
