@@ -21,7 +21,7 @@ ssh pi@[ip_address]
 ```
 password=123345678
 
-## Object detection model
+## Object detection model : best_int8_edgetpu.tflite
 Python 3.11
 Torch 2.2.2
 NumPy 1.26.4
@@ -48,6 +48,7 @@ yolo export model=runs/detect/train8/weights/best.pt format=onnx imgsz=320
 ```bash
 scp /path/to/local/file pi@<pi_ip>:/home/pi/destination
 ```
+### 5) convert to .tflite
 
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
