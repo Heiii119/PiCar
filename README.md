@@ -41,7 +41,7 @@ device=cpu
 ```
 ### 3) 
 ```bash
-yolo export model=runs/detect/train8/weights/best.pt format=tflite int8=True imgsz=320
+yolo export model=runs/detect/train8/weights/best.pt format=onnx imgsz=320
 ```
 
 ## Set up on Pi
