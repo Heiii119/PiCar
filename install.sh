@@ -69,7 +69,6 @@ pip install \
     numpy \
     opencv-python \
     tflite-runtime \
-    pycoral \
     Adafruit-Blinka \
     adafruit-circuitpython-busdevice \
     adafruit-circuitpython-connectionmanager \
