@@ -21,6 +21,25 @@ ssh pi@[ip_address]
 ```
 password=123345678
 
+## Object detection model
+Python 3.11
+Torch 2.2.2
+NumPy 1.26.4
+Ultralytics 8.4.x
+### get the dataset and data.yaml
+on data.ymal, add "path = /FULL/PATH/TO/DATASET
+### training:
+```bash
+yolo detect train \
+data=/FULL/PATH/data.yaml \
+model=yolov8n.pt \
+epochs=50 \
+imgsz=320 \
+batch=16 \
+device=cpu
+```
+
+
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
@@ -33,6 +52,10 @@ source tflite-env/bin/activate
 
 ```
 Later, to use again: ```source tflite-env/bin/activate```
+
+
+
+
 
 ### Configure I2C PCA9685 servo board (activate the venv first)
 ```bash
