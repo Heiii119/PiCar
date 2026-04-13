@@ -39,9 +39,14 @@ imgsz=320 \
 batch=16 \
 device=cpu
 ```
-### 3) 
+### 3) export
 ```bash
 yolo export model=runs/detect/train8/weights/best.pt format=onnx imgsz=320
+```
+
+### 4) scp the file to pi
+```bash
+scp /path/to/local/file pi@<pi_ip>:/home/pi/destination
 ```
 
 ## Set up on Pi
