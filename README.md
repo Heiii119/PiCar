@@ -11,6 +11,11 @@ find ip address and hostname of pi
 ```bash
 arp -a
 ```
+if ssh key need to be fixed:
+```bash
+ssh-keygen -R [ip_address]
+```
+connection:
 ```bash
 ssh pi@[ip_address]
 ```
