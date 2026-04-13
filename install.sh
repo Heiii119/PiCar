@@ -53,7 +53,7 @@ echo "======================================"
 echo "Creating virtual environment: car-venv"
 echo "======================================"
 
-python3 -m venv car-venv
+python3 -m venv car-venv --system-site-packages
 source car-venv/bin/activate
 
 echo "======================================"
