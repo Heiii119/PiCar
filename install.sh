@@ -2,19 +2,20 @@
 
 set -e
 
-echo "=============================="
+echo "===================================="
 echo "Updating system..."
-echo "=============================="
+echo "===================================="
 sudo apt update
 sudo apt upgrade -y
 
-echo "=============================="
+echo "===================================="
 echo "Installing system dependencies..."
-echo "=============================="
+echo "===================================="
 sudo apt install -y \
-    python3-venv \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
     python3-pip \
-    python3-dev \
     build-essential \
     git \
     curl \
@@ -25,11 +26,11 @@ sudo apt install -y \
     libatlas3-base \
     i2c-tools
 
-echo "=============================="
+echo "===================================="
 echo "Adding Coral repository..."
-echo "=============================="
+echo "===================================="
 
-# Add Coral GPG key (safe for Trixie)
+# Add Coral GPG key
 curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
 | sudo gpg --dearmor -o /usr/share/keyrings/coral-archive-keyring.gpg
 
@@ -39,26 +40,26 @@ echo "deb [signed-by=/usr/share/keyrings/coral-archive-keyring.gpg] https://pack
 
 sudo apt update
 
-echo "=============================="
+echo "===================================="
 echo "Installing Coral runtime..."
-echo "=============================="
+echo "===================================="
 sudo apt install -y libedgetpu1-max
 
-echo "=============================="
-echo "Creating virtual environment: car-venv"
-echo "=============================="
+echo "===================================="
+echo "Creating Python 3.11 virtual environment: car-venv"
+echo "===================================="
 
-python3 -m venv car-venv
+python3.11 -m venv car-venv
 source car-venv/bin/activate
 
-echo "=============================="
+echo "===================================="
 echo "Upgrading pip..."
-echo "=============================="
+echo "===================================="
 pip install --upgrade pip setuptools wheel
 
-echo "=============================="
+echo "===================================="
 echo "Installing Python packages..."
-echo "=============================="
+echo "===================================="
 
 pip install \
     numpy \
@@ -77,8 +78,9 @@ pip install \
     Adafruit-PlatformDetect \
     Adafruit-PureIO
 
-echo "=============================="
+echo "===================================="
 echo "✅ Installation Complete"
-echo "Activate using:"
+echo "===================================="
+echo "Activate environment with:"
 echo "source car-venv/bin/activate"
-echo "=============================="
+echo "===================================="
