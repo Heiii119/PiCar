@@ -1,9 +1,9 @@
 #!/bin/bash
 
-set -e  # Stop on error
+set -e
 
 echo "=============================="
-echo "Updating system packages..."
+echo "Updating system..."
 echo "=============================="
 sudo apt update
 sudo apt upgrade -y
@@ -18,17 +18,18 @@ sudo apt install -y \
     build-essential \
     git \
     curl \
-    libatlas-base-dev \
     libjpeg-dev \
     libopenjp2-7 \
-    libtiff5 \
+    libtiff6 \
+    libopenblas-dev \
+    libatlas3-base \
     i2c-tools
 
 echo "=============================="
-echo "Setting up Coral repository..."
+echo "Adding Coral repository..."
 echo "=============================="
 
-# Add Coral GPG key
+# Add Coral GPG key (safe for Trixie)
 curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
 | sudo gpg --dearmor -o /usr/share/keyrings/coral-archive-keyring.gpg
 
@@ -39,7 +40,7 @@ echo "deb [signed-by=/usr/share/keyrings/coral-archive-keyring.gpg] https://pack
 sudo apt update
 
 echo "=============================="
-echo "Installing Edge TPU runtime..."
+echo "Installing Coral runtime..."
 echo "=============================="
 sudo apt install -y libedgetpu1-max
 
@@ -77,7 +78,7 @@ pip install \
     Adafruit-PureIO
 
 echo "=============================="
-echo "Installation complete ✅"
-echo "Activate environment with:"
+echo "✅ Installation Complete"
+echo "Activate using:"
 echo "source car-venv/bin/activate"
 echo "=============================="
