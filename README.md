@@ -26,9 +26,10 @@ Python 3.11
 Torch 2.2.2
 NumPy 1.26.4
 Ultralytics 8.4.x
-### get the dataset and data.yaml
+### 1) get the dataset and data.yaml
+dataset can be create with roboflow
 on data.ymal, add "path = /FULL/PATH/TO/DATASET
-### training:
+### 2) training:
 ```bash
 yolo detect train \
 data=/FULL/PATH/data.yaml \
@@ -38,7 +39,10 @@ imgsz=320 \
 batch=16 \
 device=cpu
 ```
-
+### 3) 
+```bash
+yolo export model=runs/detect/train8/weights/best.pt format=tflite int8=True imgsz=320
+```
 
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
