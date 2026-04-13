@@ -79,7 +79,9 @@ pip install \
     Adafruit_GPIO \
     Adafruit_PCA9685 \
     Adafruit-PlatformDetect \
-    Adafruit-PureIO
+    Adafruit-PureIO \
+    ultralytics \
+    tensorflow
 
 echo "======================================"
 echo "✅ Installation Complete"
