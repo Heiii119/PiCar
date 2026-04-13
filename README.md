@@ -1,6 +1,21 @@
 # PiCar
 Playing around with Raspberry Pi controlled RC car!
 
+## Set up
+### 1) OS
+Raspberry Pi OS (64-bit)
+Based on Debian 12 (Bookworm)
+
+### 2) ssh set up
+find ip address and hostname of pi
+```bash
+arp -a
+```
+```bash
+ssh pi@[ip_address]
+```
+password=123345678
+
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
