@@ -53,6 +53,22 @@ scp /path/to/local/file pi@<pi_ip>:/home/pi/destination
 ## Set up on Pi
 https://docs.donkeycar.com/guide/robot_sbc/setup_raspberry_pi/
 
+```bash
+bash install.sh
+```
+```bash
+pip list | grep [...]
+```
+
+## check google coral
+```bash
+lsusb
+ls /dev/apex*
+dpkg -l | grep edgetpu
+python3 test_tpu.py
+```
+
+
 ### setup virtual env
 ```bash
 sudo apt-get update
