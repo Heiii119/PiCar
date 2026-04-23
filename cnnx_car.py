@@ -229,6 +229,16 @@ def control_loop():
 # =========================
 # FLASK ROUTES
 # =========================
+@app.route("/")
+def home():
+    return """
+    <h1>PiCar Control</h1>
+    <p><a href="/status">Status</a></p>
+    <p><a href="/mode">Toggle Mode</a></p>
+    <p><a href="/autopilot/start">Start Autopilot</a></p>
+    <p><a href="/autopilot/pause">Pause Autopilot</a></p>
+    """
+
 @app.route("/status")
 def status():
     return jsonify(values)
