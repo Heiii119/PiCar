@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-PiCar - Web Line Follower + Manual Control + ONNX Traffic Sign Detection
+PiCar - Web Line Follower + Manual Control + Color Calibration
+NOW USING model.onnx + Confidence Display
 """
 
 import os
@@ -10,7 +11,6 @@ import threading
 from datetime import datetime
 import numpy as np
 import cv2
-import cv2.dnn
 
 from flask import (
     Flask, request, redirect, url_for, Response,
@@ -28,6 +28,25 @@ from adafruit_pca9685 import PCA9685
 # CONFIG
 # =========================================================
 
+PWM_STEERING_THROTTLE = {
+    "PWM_STEERING_PIN": "PCA9685.1:0x40.1",
+    "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",
+    "STEERING_LEFT_PWM": 280,
+    "STEERING_RIGHT_PWM": 480,
+    "THROTTLE_FORWARD_PWM": 400,
+    "THROTTLE_STOPPED_PWM": 370,
+    "THROTTLE_REVERSE_PWM": 320,
+}
+
+MODE_LINE      = "line"
+MODE_SLOW      = "slow"
+MODE_STOP_SIGN = "stop_sign"
+MODE_WAIT_RED  = "wait_red"
+MODE_UTURN     = "uturn"
+
+SLOW_THROTTLE_PWM  = 395
+UTURN_THROTTLE_PWM = 420
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ONNX_MODEL_PATH = os.path.join(SCRIPT_DIR, "model.onnx")
 
@@ -38,23 +57,18 @@ IMAGE_W = 160
 IMAGE_H = 120
 ROI_FRACTION = (0.55, 0.95)
 
-DEAD_BAND_ON = 0.14
+DEAD_BAND_ON  = 0.14
 DEAD_BAND_OFF = 0.08
+NO_LINE_TIMEOUT      = 0.5
+MAX_REVERSE_DURATION = 6.0
+
+CONTROL_LOOP_HZ = 250
+CAMERA_LOOP_HZ  = 25
 
 CAM_STREAM_W = 320
 CAM_STREAM_H = 240
 
-SLOW_THROTTLE_PWM = 395
-
-PWM_STEERING_THROTTLE = {
-    "PWM_STEERING_PIN": "PCA9685.1:0x40.1",
-    "PWM_THROTTLE_PIN": "PCA9685.1:0x40.0",
-    "STEERING_LEFT_PWM": 280,
-    "STEERING_RIGHT_PWM": 480,
-    "THROTTLE_FORWARD_PWM": 400,
-    "THROTTLE_STOPPED_PWM": 370,
-    "THROTTLE_REVERSE_PWM": 320,
-}
+DATA_ROOT = "data"
 
 # =========================================================
 # PCA9685
@@ -99,6 +113,7 @@ class MotorServoController:
                 self.current_steer_pwm = pwm_value
             elif is_steer is False:
                 self.current_throttle_pwm = pwm_value
+
         return pwm_value
 
     def steering_center_pwm(self):
@@ -109,13 +124,17 @@ class MotorServoController:
         self.set_pwm_raw(self.channel_throttle,
                          self.cfg["THROTTLE_STOPPED_PWM"], False)
 
+    def close(self):
+        self.stop()
+        time.sleep(0.1)
+        self.pca.deinit()
+
     def get_pwm_status(self):
         with self.lock:
             return {
                 "steering_pwm": self.current_steer_pwm,
                 "throttle_pwm": self.current_throttle_pwm,
             }
-
 
 # =========================================================
 # CAMERA
@@ -139,17 +158,21 @@ class CameraWorker:
         self.running = True
         threading.Thread(target=self.loop, daemon=True).start()
 
+    def stop(self):
+        self.running = False
+        self.cam.stop()
+
     def loop(self):
         while self.running:
             arr = self.cam.capture_array()
             rgb = arr[..., :3]
             with self.lock:
                 self.frame = rgb.copy()
+            time.sleep(1.0 / CAMERA_LOOP_HZ)
 
     def get_frame(self):
         with self.lock:
             return None if self.frame is None else self.frame.copy()
-
 
 # =========================================================
 # MAIN SYSTEM
@@ -163,116 +186,53 @@ class WebLineFollower:
         self.motors = MotorServoController(cfg)
         self.camera = CameraWorker()
 
-        self.auto_mode = False
         self.running = False
-        self.last_center_err = 0
+        self.auto_mode = False
+        self.recording = False
+
+        self.last_line_time = 0.0
+        self.last_center_err = 0.0
         self.last_decision = "STRAIGHT"
-        self.msg = "System Ready"
 
-        # UTURN STATE MACHINE
-        self.uturn_active = False
-        self.uturn_stage = 0
-        self.uturn_start = 0
+        self.current_mode = MODE_LINE
+        self.mode_until = 0.0
 
-        # LOAD ONNX
+        self.last_sign_label = "none"
+        self.last_sign_conf = 0.0
+
+        self.ctrl_period = 1.0 / CONTROL_LOOP_HZ
+        self.msg = "Startup: MANUAL"
+
+        self._init_sign_classifier()
+
+    # =====================================================
+    # ONNX SIGN CLASSIFIER
+    # =====================================================
+
+    def _init_sign_classifier(self):
         try:
-            self.net = cv2.dnn.readNetFromONNX(ONNX_MODEL_PATH)
+            if not os.path.exists(ONNX_MODEL_PATH):
+                self.msg = "ONNX model not found"
+                self.sign_net = None
+                return
+
+            self.sign_net = cv2.dnn.readNetFromONNX(ONNX_MODEL_PATH)
             self.msg = "ONNX model loaded"
         except Exception as e:
-            self.net = None
-            self.msg = f"Model load failed: {e}"
+            self.sign_net = None
+            self.msg = f"ONNX load failed: {e}"
 
-    # =========================
-    # UTURN STATE MACHINE
-    # =========================
+    def _check_traffic_signs(self, frame_rgb, tnow):
 
-    def start_uturn(self):
-        self.uturn_active = True
-        self.uturn_stage = 0
-        self.uturn_start = time.time()
-
-    def update_uturn(self):
-
-        if not self.uturn_active:
-            return False
-
-        elapsed = time.time() - self.uturn_start
-        cfg = self.cfg
-
-        if self.uturn_stage == 0:
-            self.motors.set_pwm_raw(self.motors.channel_throttle,
-                                    SLOW_THROTTLE_PWM, False)
-            self.motors.set_pwm_raw(self.motors.channel_steer,
-                                    cfg["STEERING_RIGHT_PWM"], True)
-            if elapsed > 0.5:
-                self.uturn_stage = 1
-                self.uturn_start = time.time()
-
-        elif self.uturn_stage == 1:
-            self.motors.set_pwm_raw(self.motors.channel_throttle,
-                                    cfg["THROTTLE_FORWARD_PWM"], False)
-            self.motors.set_pwm_raw(self.motors.channel_steer,
-                                    cfg["STEERING_RIGHT_PWM"], True)
-            if elapsed > 3:
-                self.uturn_stage = 2
-                self.uturn_start = time.time()
-
-        elif self.uturn_stage == 2:
-            self.motors.set_pwm_raw(self.motors.channel_throttle,
-                                    cfg["THROTTLE_REVERSE_PWM"] - 5, False)
-            self.motors.set_pwm_raw(self.motors.channel_steer,
-                                    cfg["STEERING_LEFT_PWM"], True)
-            if elapsed > 3:
-                self.uturn_stage = 3
-                self.uturn_start = time.time()
-
-        elif self.uturn_stage == 3:
-            self.motors.set_pwm_raw(self.motors.channel_steer,
-                                    self.motors.steering_center_pwm(), True)
-            if elapsed > 0.3:
-                self.uturn_active = False
-
-        return True
-
-    # =========================
-    # LINE DETECTION
-    # =========================
-
-    def detect_line(self, frame):
-
-        small = cv2.resize(frame, (IMAGE_W, IMAGE_H))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-
-        y0 = int(IMAGE_H * ROI_FRACTION[0])
-        roi = gray[y0:IMAGE_H, :]
-
-        _, thresh = cv2.threshold(roi, 120, 255,
-                                  cv2.THRESH_BINARY_INV)
-
-        M = cv2.moments(thresh)
-        if M["m00"] == 0:
-            return None
-
-        cx = int(M["m10"] / M["m00"])
-        center_norm = (cx / IMAGE_W) * 2 - 1
-        return center_norm
-
-    # =========================
-    # ONNX SIGN DETECTION
-    # =========================
-
-    def check_signs(self, frame):
-
-        if self.net is None:
+        if self.sign_net is None:
             return
 
-        img = cv2.resize(frame, (224, 224))
-        blob = cv2.dnn.blobFromImage(img, 1/255.0,
-                                     (224, 224))
+        img = cv2.resize(frame_rgb, (224, 224))
+        blob = cv2.dnn.blobFromImage(img, 1/255.0, (224, 224))
         blob = blob.transpose(0, 2, 3, 1)
 
-        self.net.setInput(blob)
-        output = self.net.forward()[0]
+        self.sign_net.setInput(blob)
+        output = self.sign_net.forward()[0]
 
         class_id = int(np.argmax(output))
         confidence = float(output[class_id])
@@ -281,75 +241,72 @@ class WebLineFollower:
         if confidence < CONF_THRESHOLD:
             return
 
-        self.msg = f"{label} ({confidence:.2f})"
+        self.last_sign_label = label
+        self.last_sign_conf = confidence
 
-        if label in ["stop", "person"]:
-            self.motors.set_pwm_raw(
-                self.motors.channel_throttle,
-                self.cfg["THROTTLE_STOPPED_PWM"], False)
+        self._on_sign_detected(label, confidence, tnow)
 
-        elif label == "go":
-            self.motors.set_pwm_raw(
-                self.motors.channel_throttle,
-                self.cfg["THROTTLE_FORWARD_PWM"], False)
+    def _on_sign_detected(self, label, score, tnow):
 
-        elif label == "slow":
-            self.motors.set_pwm_raw(
-                self.motors.channel_throttle,
-                SLOW_THROTTLE_PWM, False)
+        l = label.lower()
 
-        elif label == "Uturn":
-            if not self.uturn_active:
-                print("U-TURN detected")
-                self.start_uturn()
+        if l in ("stop", "person"):
+            self.current_mode = MODE_STOP_SIGN
+            self.mode_until = tnow + 10.0
 
-    # =========================
+        elif l == "slow":
+            self.current_mode = MODE_SLOW
+            self.mode_until = tnow + 5.0
+
+        elif l == "uturn":
+            self.current_mode = MODE_UTURN
+            self.mode_until = tnow + 10.0
+
+        elif l == "go":
+            self.current_mode = MODE_LINE
+            self.mode_until = 0.0
+
+        self.msg = f"{label} ({score:.2f})"
+
+    # =====================================================
     # CONTROL LOOP
-    # =========================
+    # =====================================================
 
     def control_loop(self):
 
+        next_t = time.time()
+
         while self.running:
 
+            tnow = time.time()
             frame = self.camera.get_frame()
-            if frame is None:
-                continue
 
-            if self.auto_mode:
+            if frame is not None and self.auto_mode:
+                self._check_traffic_signs(frame, tnow)
 
-                # UTURN override
-                if self.update_uturn():
-                    continue
-
-                # LINE FOLLOW
-                err = self.detect_line(frame)
-
-                if err is not None:
-                    if err < -DEAD_BAND_ON:
-                        steer = self.cfg["STEERING_LEFT_PWM"]
-                        self.last_decision = "LEFT"
-                    elif err > DEAD_BAND_ON:
-                        steer = self.cfg["STEERING_RIGHT_PWM"]
-                        self.last_decision = "RIGHT"
-                    else:
-                        steer = self.motors.steering_center_pwm()
-                        self.last_decision = "STRAIGHT"
-
+                if self.current_mode == MODE_STOP_SIGN:
                     self.motors.set_pwm_raw(
-                        self.motors.channel_steer, steer, True)
+                        self.motors.channel_throttle,
+                        self.cfg["THROTTLE_STOPPED_PWM"], False)
 
+                elif self.current_mode == MODE_SLOW:
+                    self.motors.set_pwm_raw(
+                        self.motors.channel_throttle,
+                        SLOW_THROTTLE_PWM, False)
+
+                elif self.current_mode == MODE_LINE:
                     self.motors.set_pwm_raw(
                         self.motors.channel_throttle,
                         self.cfg["THROTTLE_FORWARD_PWM"], False)
 
-                # SIGN DETECTION
-                self.check_signs(frame)
+            next_t += self.ctrl_period
+            delay = next_t - time.time()
+            if delay > 0:
+                time.sleep(delay)
 
-            time.sleep(0.02)
-
-    # =========================
+    # =====================================================
     # LIFECYCLE
-    # =========================
+    # =====================================================
 
     def start(self):
         self.camera.start()
@@ -359,18 +316,21 @@ class WebLineFollower:
 
     def stop(self):
         self.running = False
+        self.camera.stop()
         self.motors.stop()
+        self.motors.close()
 
     def get_status(self):
         pwm = self.motors.get_pwm_status()
         return {
             "auto_mode": self.auto_mode,
-            "decision": self.last_decision,
+            "sign_mode": self.current_mode,
+            "sign_label": self.last_sign_label,
+            "sign_confidence": round(self.last_sign_conf, 3),
             "steering_pwm": pwm["steering_pwm"],
             "throttle_pwm": pwm["throttle_pwm"],
             "msg": self.msg
         }
-
 
 # =========================================================
 # FLASK
@@ -381,7 +341,23 @@ lf = WebLineFollower(PWM_STEERING_THROTTLE)
 
 @app.route("/")
 def index():
-    return "<h1>PiCar ONNX Running</h1><a href='/video'>Video</a>"
+    return """
+    <h1>PiCar ONNX</h1>
+    <a href='/auto'>AUTO</a> |
+    <a href='/manual'>MANUAL</a><br><br>
+    <img src='/video_feed'><br>
+    <pre id='status'></pre>
+    <script>
+    setInterval(() => {
+      fetch('/status')
+        .then(r=>r.json())
+        .then(d=>{
+          document.getElementById('status').innerText =
+            JSON.stringify(d,null,2);
+        });
+    }, 500);
+    </script>
+    """
 
 @app.route("/status")
 def status():
@@ -397,8 +373,8 @@ def manual():
     lf.auto_mode = False
     return "MANUAL"
 
-@app.route("/video")
-def video():
+@app.route("/video_feed")
+def video_feed():
     def gen():
         while True:
             frame = lf.camera.get_frame()
