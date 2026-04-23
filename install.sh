@@ -80,7 +80,10 @@ pip install \
     Adafruit_PCA9685 \
     Adafruit-PlatformDetect \
     Adafruit-PureIO \
-    ultralytics 
+    ultralytics \
+    flask \
+    flask-socketio \
+    eventlet
 
 echo "======================================"
 echo "✅ Installation Complete"
