@@ -11,9 +11,9 @@ from picamera2 import Picamera2
 from libcamera import Transform
 
 
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
 
 CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 CONF_THRESHOLD = 0.75
@@ -38,9 +38,10 @@ values = {
     "steering": STEERING_CENTER
 }
 
-# =========================
+
+# =========================================================
 # CAMERA
-# =========================
+# =========================================================
 
 picam = Picamera2()
 picam.configure(
@@ -51,21 +52,20 @@ picam.configure(
 )
 picam.start()
 
-_latest_frame = None
 _latest_jpeg = None
 _latest_lock = threading.Lock()
 
 
-# =========================
-# LOAD MODEL
-# =========================
+# =========================================================
+# LOAD ONNX MODEL
+# =========================================================
 
 net = cv2.dnn.readNetFromONNX("model.onnx")
 
 
-# =========================
-# U-TURN STATE MACHINE
-# =========================
+# =========================================================
+# U-TURN STATE MACHINE (NON-BLOCKING)
+# =========================================================
 
 uturn_active = False
 uturn_stage = 0
@@ -114,9 +114,9 @@ def update_uturn():
     return True
 
 
-# =========================
-# LINE FOLLOW
-# =========================
+# =========================================================
+# LINE FOLLOWING
+# =========================================================
 
 def line_follow(frame):
 
@@ -140,28 +140,25 @@ def line_follow(frame):
     values["throttle"] = THROTTLE_FORWARD
 
 
-# =========================
+# =========================================================
 # AUTOPILOT LOOP
-# =========================
+# =========================================================
 
 def autopilot_loop():
-    global CURRENT_LABEL, _latest_frame, _latest_jpeg
+    global CURRENT_LABEL, _latest_jpeg
 
     while True:
 
         frame = picam.capture_array()[..., :3]
-        _latest_frame = frame
 
         if MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and not E_STOP:
 
             if update_uturn():
                 CURRENT_LABEL = "AUTOPILOT | Uturn"
-            else:
 
-                # Always line follow
+            else:
                 line_follow(frame)
 
-                # Sign detection
                 img = cv2.resize(frame, (224,224))
                 blob = cv2.dnn.blobFromImage(img, 1/255.0, (224,224))
                 blob = blob.transpose(0,2,3,1)
@@ -195,7 +192,7 @@ def autopilot_loop():
         else:
             CURRENT_LABEL = "MANUAL | none"
 
-        # Encode frame
+        # Overlay label
         cv2.putText(frame, f"Label: {CURRENT_LABEL}", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
 
@@ -204,37 +201,66 @@ def autopilot_loop():
             with _latest_lock:
                 _latest_jpeg = enc.tobytes()
 
+        time.sleep(0.03)
+
 
 threading.Thread(target=autopilot_loop, daemon=True).start()
 
 
-# =========================
-# FLASK
-# =========================
+# =========================================================
+# FLASK SERVER
+# =========================================================
 
 app = Flask(__name__)
+
 
 @app.route("/")
 def index():
     return """
     <h1>PiCar ONNX</h1>
-    <img src='/video'>
+
+    <img src='/video'><br><br>
+
     <form method='post' action='/cmd'>
         <button name='a' value='auto'>AUTO</button>
         <button name='a' value='manual'>MANUAL</button>
     </form>
+
+    <br><br>
+
+    <button onclick="sendArrow('up')">⬆️</button><br>
+    <button onclick="sendArrow('left')">⬅️</button>
+    <button onclick="sendArrow('stop')">⏹</button>
+    <button onclick="sendArrow('right')">➡️</button><br>
+    <button onclick="sendArrow('down')">⬇️</button>
+
+    <script>
+    function sendArrow(dir) {
+        fetch('/arrow', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dir: dir})
+        });
+    }
+    </script>
     """
 
-@app.route("/cmd", methods=["GET", "POST"])
+
+@app.route("/cmd", methods=["POST"])
 def cmd():
-    global MODE
-    if request.method == "POST":
-        if request.form.get("a") == "auto":
-            MODE = "AUTOPILOT"
-        else:
-            MODE = "MANUAL"
-            values["throttle"] = THROTTLE_STOPPED
+    global MODE, AUTOPILOT_RUNNING, E_STOP
+
+    if request.form.get("a") == "auto":
+        MODE = "AUTOPILOT"
+        AUTOPILOT_RUNNING = True
+        E_STOP = False
+    else:
+        MODE = "MANUAL"
+        AUTOPILOT_RUNNING = False
+        values["throttle"] = THROTTLE_STOPPED
+
     return redirect("/")
+
 
 @app.route("/status")
 def status():
@@ -244,6 +270,7 @@ def status():
         "mode": MODE,
         "label": CURRENT_LABEL
     })
+
 
 @app.route("/arrow", methods=["POST"])
 def arrow():
@@ -263,11 +290,13 @@ def arrow():
 
     return "OK"
 
+
 @app.route("/mode")
 def toggle_mode():
     global MODE
     MODE = "AUTOPILOT" if MODE=="MANUAL" else "MANUAL"
     return "OK"
+
 
 @app.route("/autopilot/start")
 def auto_start():
@@ -275,11 +304,13 @@ def auto_start():
     AUTOPILOT_RUNNING = True
     return "STARTED"
 
+
 @app.route("/autopilot/pause")
 def auto_pause():
     global AUTOPILOT_RUNNING
     AUTOPILOT_RUNNING = False
     return "PAUSED"
+
 
 @app.route("/estop")
 def estop():
@@ -287,6 +318,7 @@ def estop():
     E_STOP = True
     values["throttle"] = THROTTLE_STOPPED
     return "STOPPED"
+
 
 @app.route("/video")
 def video():
