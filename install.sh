@@ -67,7 +67,7 @@ echo "Installing Python packages..."
 echo "======================================"
 
 pip install \
-    numpy \
+    numpy==1.26.4 \
     tflite-runtime \
     Adafruit-Blinka \
     adafruit-circuitpython-busdevice \
