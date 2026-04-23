@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, Response
 import time
 import threading
 import cv2
@@ -10,7 +10,7 @@ from smbus2 import SMBus
 # =========================
 # CONFIG
 # =========================
-DEVICE = "/dev/video0"
+DEVICE = 0
 PORT = 6088
 
 MODEL_PATH = "model.onnx"
@@ -52,6 +52,10 @@ values = {
     "steering": STEERING_CENTER,
 }
 
+_latest_lock = threading.Lock()
+_latest_jpeg = None
+frame_counter = 0
+
 # =========================
 # PCA9685
 # =========================
@@ -88,7 +92,7 @@ class PCA9685:
         self.write8(base + 3, (value >> 8) & 0xFF)
 
 # =========================
-# ONNX MODEL INITIALIZATION
+# ONNX MODEL
 # =========================
 net = None
 
@@ -96,12 +100,11 @@ def init_model():
     global net
     print("✅ Loading ONNX model (CPU)...")
     net = cv2.dnn.readNetFromONNX(MODEL_PATH)
-
     net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
 # =========================
-# LINE CALIBRATION
+# LINE FOLLOW
 # =========================
 def calibrate_line(frame):
     global LINE_THRESHOLD
@@ -109,11 +112,7 @@ def calibrate_line(frame):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     LINE_THRESHOLD = int(np.mean(gray) * 0.8)
 
-# =========================
-# ADVANCED LINE FOLLOW
-# =========================
 def line_follow(frame):
-
     h, w = frame.shape[:2]
     roi = frame[int(h*0.6):h, :]
 
@@ -126,14 +125,12 @@ def line_follow(frame):
     hsv_mask = cv2.inRange(hsv, lower_white, upper_white)
 
     mask = cv2.bitwise_or(gray_mask, hsv_mask)
-
     kernel = np.ones((5,5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     moments = cv2.moments(mask)
 
     if moments["m00"] > 1000:
-
         cx = int(moments["m10"] / moments["m00"])
         error = cx - (w // 2)
         normalized_error = error / (w//2)
@@ -141,39 +138,32 @@ def line_follow(frame):
         steer = STEERING_CENTER - int(normalized_error * 120)
         values["steering"] = max(STEERING_MIN, min(STEERING_MAX, steer))
 
-        upper = mask[:mask.shape[0]//2, :]
-        lower = mask[mask.shape[0]//2:, :]
-
-        m1 = cv2.moments(upper)
-        m2 = cv2.moments(lower)
-
-        if m1["m00"] > 500 and m2["m00"] > 500:
-            cx1 = int(m1["m10"] / m1["m00"])
-            cx2 = int(m2["m10"] / m2["m00"])
-            curvature = abs(cx1 - cx2)
-
-            if curvature > 40:
-                values["throttle"] = THROTTLE_SLOW
-            else:
-                values["throttle"] = THROTTLE_FORWARD - 5
-        else:
-            values["throttle"] = THROTTLE_SLOW
+        values["throttle"] = THROTTLE_FORWARD - 5
     else:
         values["throttle"] = THROTTLE_STOPPED
 
 # =========================
 # CAMERA THREAD
 # =========================
-frame_counter = 0
-
 def camera_worker():
-    global frame_counter, CURRENT_LABEL
+    global frame_counter, CURRENT_LABEL, _latest_jpeg
 
-    cap = cv2.VideoCapture(DEVICE)
+    cap = cv2.VideoCapture(DEVICE, cv2.CAP_V4L2)
+
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    if not cap.isOpened():
+        print("❌ Failed to open camera")
+        return
+    else:
+        print("✅ Camera opened successfully")
 
     while True:
         ret, frame = cap.read()
         if not ret:
+            print("❌ Frame grab failed")
             continue
 
         frame_counter += 1
@@ -216,6 +206,18 @@ def camera_worker():
                         values["steering"] = STEERING_MAX
                         values["throttle"] = THROTTLE_FORWARD
 
+        # Overlay info
+        cv2.putText(frame, f"Mode: {MODE}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+
+        cv2.putText(frame, f"Label: {CURRENT_LABEL}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+
+        ret, jpeg = cv2.imencode(".jpg", frame)
+        if ret:
+            with _latest_lock:
+                _latest_jpeg = jpeg.tobytes()
+
 # =========================
 # CONTROL LOOP
 # =========================
@@ -232,16 +234,35 @@ def control_loop():
 @app.route("/")
 def home():
     return """
-    <h1>PiCar Control</h1>
-    <p><a href="/status">Status</a></p>
-    <p><a href="/mode">Toggle Mode</a></p>
-    <p><a href="/autopilot/start">Start Autopilot</a></p>
-    <p><a href="/autopilot/pause">Pause Autopilot</a></p>
+    <html>
+    <head><title>PiCar Dashboard</title></head>
+    <body>
+        <h1>PiCar Dashboard</h1>
+        <img src="/video" width="640"/>
+        <br><br>
+        <a href="/mode">Toggle Mode</a><br>
+        <a href="/autopilot/start">Start Autopilot</a><br>
+        <a href="/autopilot/pause">Pause Autopilot</a>
+    </body>
+    </html>
     """
 
-@app.route("/status")
-def status():
-    return jsonify(values)
+@app.route("/video")
+def video():
+    def generate():
+        global _latest_jpeg
+        while True:
+            with _latest_lock:
+                if _latest_jpeg is None:
+                    continue
+                frame = _latest_jpeg
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n" +
+                   frame + b"\r\n")
+            time.sleep(0.03)
+
+    return Response(generate(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 @app.route("/mode")
 def toggle_mode():
@@ -273,5 +294,5 @@ if __name__ == "__main__":
 
     print("✅ ONNX CPU mode active")
     print("Open http://<board-ip>:6088/")
+
     app.run(host="0.0.0.0", port=PORT)
-  
