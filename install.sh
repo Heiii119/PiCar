@@ -23,6 +23,7 @@ sudo apt install -y \
     libtiff6 \
     libopenblas-dev \
     libatlas3-base \
+    python3-opencv \
     i2c-tools
 
 echo "======================================"
@@ -67,7 +68,6 @@ echo "======================================"
 
 pip install \
     numpy \
-    opencv-python \
     tflite-runtime \
     Adafruit-Blinka \
     adafruit-circuitpython-busdevice \
