@@ -68,6 +68,17 @@ dpkg -l | grep edgetpu
 python3 test_tpu.py
 ```
 
+## check cv2, numpy and webcam
+```bash
+python - <<EOF
+import numpy
+import cv2
+print("NumPy:", numpy.__version__)
+print("CV2 path:", cv2.__file__)
+cap = cv2.VideoCapture(0)
+print("Camera opened:", cap.isOpened())
+EOF
+```
 
 ### setup virtual env
 ```bash
