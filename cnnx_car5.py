@@ -223,14 +223,17 @@ def index():
     </form>
     """
 
-@app.route("/cmd", methods=["POST"])
+@app.route("/cmd", methods=["GET", "POST"])
 def cmd():
     global MODE
-    if request.form.get("a") == "auto":
-        MODE = "AUTOPILOT"
-    else:
-        MODE = "MANUAL"
-        values["throttle"] = THROTTLE_STOPPED
+
+    if request.method == "POST":
+        if request.form.get("a") == "auto":
+            MODE = "AUTOPILOT"
+        else:
+            MODE = "MANUAL"
+            values["throttle"] = THROTTLE_STOPPED
+
     return index()
 
 @app.route("/status")
