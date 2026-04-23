@@ -10,7 +10,7 @@ from smbus2 import SMBus
 # =========================
 # CONFIG
 # =========================
-DEVICE = "/dev/video4"
+DEVICE = "/dev/video0"
 PORT = 6088
 
 MODEL_PATH = "model.onnx"
