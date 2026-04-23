@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import os
 import time
 import threading
 import numpy as np
@@ -58,10 +57,11 @@ _latest_seq = 0
 _latest_lock = threading.Lock()
 
 # =========================
-# ONNX MODEL
+# LOAD ONNX
 # =========================
 
 net = cv2.dnn.readNetFromONNX("model.onnx")
+
 
 # =========================
 # U-TURN STATE MACHINE
@@ -146,7 +146,7 @@ def line_follow(frame):
 # =========================
 
 def autopilot_loop():
-    global CURRENT_LABEL
+    global CURRENT_LABEL, _latest_frame, _latest_jpeg, _latest_seq
 
     while True:
 
@@ -155,60 +155,83 @@ def autopilot_loop():
 
         if MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and not E_STOP:
 
-            # If U-turn active → priority
+            # U-turn priority
             if update_uturn():
-                continue
+                pass
+            else:
 
-            # Always line follow
-            line_follow(frame)
+                # Always line follow
+                line_follow(frame)
 
-            # Sign detection in parallel
-            img = cv2.resize(frame, (224,224))
-            blob = cv2.dnn.blobFromImage(img, 1/255.0, (224,224))
-            blob = blob.transpose(0,2,3,1)
+                # Sign detection
+                img = cv2.resize(frame, (224,224))
+                blob = cv2.dnn.blobFromImage(img, 1/255.0, (224,224))
+                blob = blob.transpose(0,2,3,1)
 
-            net.setInput(blob)
-            output = net.forward()[0]
+                net.setInput(blob)
+                output = net.forward()[0]
 
-            class_id = int(np.argmax(output))
-            confidence = float(output[class_id])
-            label = CLASS_NAMES[class_id]
+                class_id = int(np.argmax(output))
+                confidence = float(output[class_id])
+                label = CLASS_NAMES[class_id]
 
-            CURRENT_LABEL = label
+                CURRENT_LABEL = label
 
-            if confidence > CONF_THRESHOLD:
+                if confidence > CONF_THRESHOLD:
 
-                if label in ["stop","person"]:
-                    values["throttle"] = THROTTLE_STOPPED
+                    if label in ["stop","person"]:
+                        values["throttle"] = THROTTLE_STOPPED
 
-                elif label == "go":
-                    values["throttle"] = THROTTLE_FORWARD
+                    elif label == "go":
+                        values["throttle"] = THROTTLE_FORWARD
 
-                elif label == "slow":
-                    values["throttle"] = THROTTLE_SLOW
+                    elif label == "slow":
+                        values["throttle"] = THROTTLE_SLOW
 
-                elif label == "background":
-                    pass  # line follow already running
+                    elif label == "background":
+                        pass  # already line following
 
-                elif label == "Uturn":
-                    print("U-TURN detected")
-                    start_uturn()
+                    elif label == "Uturn":
+                        print("U-TURN detected")
+                        start_uturn()
 
         # Encode frame
-        _, enc = cv2.imencode(".jpg", frame)
-        with _latest_lock:
-            global _latest_jpeg, _latest_seq
-            _latest_jpeg = enc.tobytes()
-            _latest_seq += 1
+        ret, enc = cv2.imencode(".jpg", frame)
+        if ret:
+            with _latest_lock:
+                _latest_jpeg = enc.tobytes()
+                _latest_seq += 1
 
 
 threading.Thread(target=autopilot_loop, daemon=True).start()
 
+
 # =========================
-# ROUTES
+# FLASK
 # =========================
 
 app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return """
+    <h1>PiCar ONNX</h1>
+    <img src='/video'>
+    <form method='post' action='/cmd'>
+        <button name='a' value='auto'>AUTO</button>
+        <button name='a' value='manual'>MANUAL</button>
+    </form>
+    """
+
+@app.route("/cmd", methods=["POST"])
+def cmd():
+    global MODE
+    if request.form.get("a") == "auto":
+        MODE = "AUTOPILOT"
+    else:
+        MODE = "MANUAL"
+        values["throttle"] = THROTTLE_STOPPED
+    return index()
 
 @app.route("/status")
 def status():
