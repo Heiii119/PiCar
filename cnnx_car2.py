@@ -5,7 +5,6 @@ import time
 import threading
 import numpy as np
 from flask import Flask, Response
-
 from smbus2 import SMBus
 
 # =========================
@@ -21,7 +20,6 @@ CONTROL_DT = 1.0 / 60.0
 
 CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 CONF_THRESHOLD = 0.7
-
 LINE_THRESHOLD = 100
 
 # =========================
@@ -34,7 +32,7 @@ I2C_BUS = 1
 THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
 
-THROTTLE_STOPPED = 370
+THROTTLE_STOPPED = 393
 THROTTLE_FORWARD = 415
 THROTTLE_SLOW = 400
 
@@ -45,9 +43,6 @@ STEERING_MAX = 480
 # =========================
 # GLOBAL STATE
 # =========================
-MODE = "AUTOPILOT"
-AUTOPILOT_RUNNING = True
-E_STOP = False
 CURRENT_LABEL = "None"
 
 values = {
@@ -123,24 +118,20 @@ def centroid_line_detection(frame):
         values["throttle"] = THROTTLE_STOPPED
         return
 
-    # --- Weighted centroid (bottom rows more important)
     weights = ys + 1
     cx = int(np.average(xs, weights=weights))
 
     error = (cx - w//2) / (w//2)
 
-    # --- Curvature approximation
     curvature = np.polyfit(ys, xs, 1)[0] / w
 
-    # --- Steering control
     steer = STEERING_CENTER - int(error * 120)
     steer = max(STEERING_MIN, min(STEERING_MAX, steer))
 
-    # --- Curve slowdown
     curve_factor = min(1.0, abs(curvature) * 5.0)
     throttle = int(np.interp(curve_factor,
-                              [0,1],
-                              [THROTTLE_FORWARD, THROTTLE_SLOW]))
+                             [0,1],
+                             [THROTTLE_FORWARD, THROTTLE_SLOW]))
 
     values["steering"] = steer
     values["throttle"] = throttle
@@ -166,32 +157,48 @@ def camera_worker():
 
         frame_counter += 1
 
-        if frame_counter % 4 == 0:
-            img = cv2.resize(frame, (224,224))
-            blob = cv2.dnn.blobFromImage(img, 1/255.0,
-                                         (224,224),
-                                         swapRB=True)
+        try:
+            if frame_counter % 4 == 0:
 
-            net.setInput(blob)
-            output = net.forward()[0]
+                img = cv2.resize(frame, (224,224))
 
-            class_id = int(np.argmax(output))
-            confidence = float(output[class_id])
-            label = CLASS_NAMES[class_id]
-            CURRENT_LABEL = label
+                blob = cv2.dnn.blobFromImage(
+                    img,
+                    scalefactor=1.0/255.0,
+                    size=(224,224),
+                    mean=(0,0,0),
+                    swapRB=True,
+                    crop=False
+                )
 
-            if confidence > CONF_THRESHOLD:
-                if label in ["stop","person"]:
-                    values["throttle"] = THROTTLE_STOPPED
-                elif label == "slow":
-                    values["throttle"] = THROTTLE_SLOW
-                elif label == "go":
-                    values["throttle"] = THROTTLE_FORWARD
-                elif label == "Uturn":
-                    values["steering"] = STEERING_MAX
+                # ✅ Prevent DNN crash
+                if blob.shape != (1,3,224,224):
+                    print("⚠ Blob shape error:", blob.shape)
                 else:
-                    centroid_line_detection(frame)
-        else:
+                    net.setInput(blob)
+                    output = net.forward()[0]
+
+                    class_id = int(np.argmax(output))
+                    confidence = float(output[class_id])
+                    label = CLASS_NAMES[class_id]
+                    CURRENT_LABEL = label
+
+                    if confidence > CONF_THRESHOLD:
+                        if label in ["stop","person"]:
+                            values["throttle"] = THROTTLE_STOPPED
+                        elif label == "slow":
+                            values["throttle"] = THROTTLE_SLOW
+                        elif label == "go":
+                            values["throttle"] = THROTTLE_FORWARD
+                        elif label == "Uturn":
+                            values["steering"] = STEERING_MAX
+                        else:
+                            centroid_line_detection(frame)
+            else:
+                centroid_line_detection(frame)
+
+        except Exception as e:
+            print("⚠ Inference error:", e)
             centroid_line_detection(frame)
 
         cv2.putText(frame, f"Label: {CURRENT_LABEL}",
@@ -203,14 +210,13 @@ def camera_worker():
             with _latest_lock:
                 _latest_jpeg = jpeg.tobytes()
 
-        # --- enforce 10 FPS
         elapsed = time.time() - start
         sleep = CAMERA_DT - elapsed
         if sleep > 0:
             time.sleep(sleep)
 
 # =========================
-# CONTROL LOOP (60 Hz)
+# CONTROL LOOP (60Hz)
 # =========================
 def control_loop():
     pwm = PCA9685(I2C_BUS, PCA9685_ADDR, PCA9685_FREQ)
@@ -258,4 +264,8 @@ if __name__ == "__main__":
     init_model()
     threading.Thread(target=camera_worker, daemon=True).start()
     threading.Thread(target=control_loop, daemon=True).start()
+
+    print("✅ System Ready")
+    print(f"Open http://<board-ip>:{PORT}")
+
     app.run(host="0.0.0.0", port=PORT, threaded=True)
