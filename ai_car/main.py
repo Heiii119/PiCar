@@ -15,14 +15,17 @@ from controller import RobotController
 # =========================
 
 line_detector = LineDetector()
-sign_detector = SignDetector("model.onnx")
+sign_detector = SignDetector("model.onnx")  # inference interval handled inside
 controller = RobotController()
 
 app = Flask(__name__)
 
 camera = cv2.VideoCapture(0)
+camera.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
 running = True
+
 latest_frame = None
 latest_debug = None
 latest_offset = 0
@@ -31,7 +34,7 @@ latest_conf = 0.0
 
 
 # =========================
-# MAIN LOOP THREAD
+# MAIN LOOP THREAD (10 FPS)
 # =========================
 def robot_loop():
     global latest_frame, latest_debug
@@ -41,12 +44,13 @@ def robot_loop():
 
         ret, frame = camera.read()
         if not ret:
+            time.sleep(0.01)
             continue
 
         # ---- Line detection ----
         offset, debug_frame = line_detector.process(frame)
 
-        # ---- Sign detection ----
+        # ---- Sign detection (already runs every 4 frames internally) ----
         label, conf = sign_detector.detect(frame)
 
         # ---- Controller update ----
@@ -59,7 +63,8 @@ def robot_loop():
         latest_sign = label
         latest_conf = conf
 
-        time.sleep(0.02)  # ~50 FPS cap
+        # ✅ Limit to ~10 FPS
+        time.sleep(0.1)
 
 
 # Start robot thread
@@ -67,20 +72,35 @@ threading.Thread(target=robot_loop, daemon=True).start()
 
 
 # =========================
-# VIDEO STREAM
+# VIDEO STREAM (Every 4th Frame)
 # =========================
 def generate_stream():
     global latest_debug
 
+    stream_counter = 0
+
     while True:
+
         if latest_debug is None:
+            time.sleep(0.01)
             continue
 
-        _, jpeg = cv2.imencode(".jpg", latest_debug)
+        stream_counter += 1
+
+        # ✅ Stream only every 4th frame
+        if stream_counter % 4 != 0:
+            time.sleep(0.01)
+            continue
+
+        ret, jpeg = cv2.imencode(".jpg", latest_debug)
+        if not ret:
+            continue
+
         frame_bytes = jpeg.tobytes()
 
         yield (b"--frame\r\n"
-               b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+               b"Content-Type: image/jpeg\r\n\r\n" +
+               frame_bytes + b"\r\n")
 
 
 @app.route("/video")
@@ -136,7 +156,7 @@ def index():
     <body>
         <h1>Autonomous Car Control</h1>
 
-        <img src="/video" width="640"/>
+        <img src="/video" width="480"/>
 
         <h3>Status</h3>
         <div>Offset: <span id="offset"></span></div>
