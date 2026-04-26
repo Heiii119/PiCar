@@ -10,7 +10,7 @@ from tflite_runtime.interpreter import Interpreter, load_delegate
 # CONFIG
 # =========================================================
 
-MODEL_PATH = "model_edgetpu.tflite"
+MODEL_PATH = "model.tflite"
 
 CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 CONF_THRESHOLD = 0.75
