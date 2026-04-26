@@ -86,12 +86,15 @@ class SignDetector:
             # ---- Resize to model input ----
             img = cv2.resize(crop, (224, 224))
 
-            blob = cv2.dnn.blobFromImage(
-                img,
-                scalefactor=1 / 255.0,
-                size=(224, 224),
-                swapRB=False
-            )
+            # Convert BGR → RGB (very important for TF models)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # Normalize
+            img = img.astype(np.float32) / 255.0
+
+            # Convert HWC → NCHW
+            blob = np.transpose(img, (2, 0, 1))
+            blob = np.expand_dims(blob, axis=0)
 
             self.net.setInput(blob)
             output = self.net.forward()[0]
