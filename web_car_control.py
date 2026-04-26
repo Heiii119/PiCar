@@ -157,28 +157,28 @@ self.current_throttle_pwm = self.cfg["THROTTLE_STOPPED_PWM"]
 self.stop()
 
 def set_pwm_raw(self, channel, pwm_value, is_steer=None):
-pwm_value = int(np.clip(pwm_value, 0, 4095))
-duty16 = int((pwm_value / 4095.0) * 65535)
-with self.lock:
-self.pca.channels[channel].duty_cycle = duty16
-if is_steer is True:
-self.current_steer_pwm = pwm_value
-elif is_steer is False:
-self.current_throttle_pwm = pwm_value
-return pwm_value
+   pwm_value = int(np.clip(pwm_value, 0, 4095))
+   duty16 = int((pwm_value / 4095.0) * 65535)
+   with self.lock:
+      self.pca.channels[channel].duty_cycle = duty16
+   if is_steer is True:
+      self.current_steer_pwm = pwm_value
+   elif is_steer is False:
+      self.current_throttle_pwm = pwm_value
+   return pwm_value
 
 def steering_center_pwm(self):
-left = self.cfg["STEERING_LEFT_PWM"]
-right = self.cfg["STEERING_RIGHT_PWM"]
-return int(round((left + right) / 2))
+   left = self.cfg["STEERING_LEFT_PWM"]
+   right = self.cfg["STEERING_RIGHT_PWM"]
+   return int(round((left + right) / 2))
 
 def stop(self):
-self.set_pwm_raw(self.channel_throttle, self.cfg["THROTTLE_STOPPED_PWM"], is_steer=False)
+   self.set_pwm_raw(self.channel_throttle, self.cfg["THROTTLE_STOPPED_PWM"], is_steer=False)
 
 def close(self):
-self.stop()
-time.sleep(0.1)
-self.pca.deinit()
+   self.stop()
+   time.sleep(0.1)
+   self.pca.deinit()
 
 def get_pwm_status(self):
 with self.lock:
