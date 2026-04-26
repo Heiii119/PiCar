@@ -5,7 +5,7 @@ from picamera2 import Picamera2
 from tflite_runtime.interpreter import Interpreter, load_delegate
 
 # ====== SETTINGS ======
-MODEL_PATH = "best_int8_edgetpu.tflite"
+MODEL_PATH = "model.tflite"
 INPUT_SIZE = 320
 CONF_THRESHOLD = 0.4
 
