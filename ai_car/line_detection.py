@@ -1,0 +1,167 @@
+# line_detection.py
+import cv2
+import numpy as np
+
+
+class LineDetector:
+
+    def __init__(self):
+
+        # ----- Detection mode -----
+        # "gray" or "hsv"
+        self.mode = "gray"
+
+        # ----- Gray settings -----
+        self.gray_threshold = 120
+
+        # ----- HSV settings -----
+        self.hue_low = 15
+        self.hue_high = 40
+        self.sat_min = 50
+        self.val_min = 50
+
+        # ----- ROI -----
+        # percentage of lower image used
+        self.roi_ratio = 0.5
+
+        # ----- Morphology -----
+        self.kernel = np.ones((5, 5), np.uint8)
+
+        # ----- Debug -----
+        self.last_mask = None
+
+    # =========================================
+    # PUBLIC PROCESS FUNCTION
+    # =========================================
+    def process(self, frame):
+        """
+        Returns:
+            offset (int)
+            debug_frame (BGR image)
+        """
+
+        h, w, _ = frame.shape
+
+        # ---- ROI (bottom part of image) ----
+        roi = frame[int(h * (1 - self.roi_ratio)):h, :]
+        roi_center_x = w // 2
+
+        if self.mode == "gray":
+            mask = self._gray_pipeline(roi)
+        else:
+            mask = self._hsv_pipeline(roi)
+
+        self.last_mask = mask
+
+        center = self._find_line_center(mask)
+
+        if center is None:
+            offset = 0
+        else:
+            offset = center - roi_center_x
+
+        debug = self._make_debug_frame(frame, mask, center)
+
+        return offset, debug
+
+    # =========================================
+    # GRAY PIPELINE
+    # =========================================
+    def _gray_pipeline(self, roi):
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        _, binary = cv2.threshold(
+            gray,
+            self.gray_threshold,
+            255,
+            cv2.THRESH_BINARY_INV
+        )
+
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.kernel)
+
+        return binary
+
+    # =========================================
+    # HSV PIPELINE
+    # =========================================
+    def _hsv_pipeline(self, roi):
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        lower = np.array([self.hue_low, self.sat_min, self.val_min])
+        upper = np.array([self.hue_high, 255, 255])
+
+        mask = cv2.inRange(hsv, lower, upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+
+        return mask
+
+    # =========================================
+    # FIND LINE CENTER
+    # =========================================
+    def _find_line_center(self, mask):
+
+        moments = cv2.moments(mask)
+
+        if moments["m00"] == 0:
+            return None
+
+        cx = int(moments["m10"] / moments["m00"])
+        return cx
+
+    # =========================================
+    # DEBUG FRAME
+    # =========================================
+    def _make_debug_frame(self, frame, mask, center):
+
+        debug = frame.copy()
+        h, w, _ = frame.shape
+
+        roi_top = int(h * (1 - self.roi_ratio))
+        roi_height = h - roi_top
+
+        # Draw ROI rectangle
+        cv2.rectangle(
+            debug,
+            (0, roi_top),
+            (w, h),
+            (0, 255, 0),
+            2
+        )
+
+        # Draw center line of frame
+        cv2.line(
+            debug,
+            (w // 2, roi_top),
+            (w // 2, h),
+            (255, 0, 0),
+            2
+        )
+
+        if center is not None:
+            cv2.circle(
+                debug,
+                (center, roi_top + roi_height // 2),
+                8,
+                (0, 0, 255),
+                -1
+            )
+
+        return debug
+
+    # =========================================
+    # SETTINGS UPDATE (Optional)
+    # =========================================
+    def set_gray_threshold(self, value):
+        self.gray_threshold = int(value)
+
+    def set_hsv_range(self, h_low, h_high, s_min, v_min):
+        self.hue_low = int(h_low)
+        self.hue_high = int(h_high)
+        self.sat_min = int(s_min)
+        self.val_min = int(v_min)
+
+    def set_mode(self, mode):
+        if mode in ["gray", "hsv"]:
+            self.mode = mode
