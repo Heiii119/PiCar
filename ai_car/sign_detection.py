@@ -1,7 +1,8 @@
 # sign_detection.py
+
+import os
 import cv2
 import numpy as np
-import os
 
 
 class SignDetector:
@@ -14,91 +15,67 @@ class SignDetector:
         self.conf_threshold = conf_threshold
 
         self.net = None
-        self.class_names = None
-        self.label_map = None
+
+        # MUST match training order exactly
+        self.class_names = [
+            "background",
+            "stop",
+            "person",
+            "slow",
+            "Uturn",
+            "go"
+        ]
 
         self._load_model()
 
-    # =========================================
+    # ======================================================
     # LOAD ONNX MODEL
-    # =========================================
+    # ======================================================
+
     def _load_model(self):
 
         if not os.path.exists(self.model_path):
-            print("SignDetector: model not found -> disabled")
+            print("❌ SignDetector: ONNX model not found")
             return
 
         try:
             self.net = cv2.dnn.readNetFromONNX(self.model_path)
-
-            # ⚠ IMPORTANT:
-            # MUST match training class order exactly
-            self.class_names = [
-                "background",
-                "stop",
-                "person",
-                "slow",
-                "Uturn",
-                "go"
-            ]
-
-            # Map raw labels to controller labels
-            self.label_map = {
-                "stop": "stop",
-                "person": "stop",     # treat person as stop
-                "slow": "slow",
-                "Uturn": "uturn",
-                "go": "go",
-                "background": None
-            }
-
-            print("SignDetector: ONNX model loaded")
+            print("✅ SignDetector: ONNX model loaded")
 
         except Exception as e:
-            print("SignDetector: model load failed:", e)
+            print("❌ SignDetector: Failed to load model:", e)
             self.net = None
 
-    # =========================================
-    # DETECT SIGN
-    # =========================================
+    # ======================================================
+    # SIGN DETECTION (NHWC FIX FOR TF ONNX)
+    # ======================================================
+
     def detect(self, frame):
         """
         Returns:
-            (label, confidence)
-            label = None if no valid detection
+            label (str or None)
+            confidence (float)
         """
 
         if self.net is None:
             return None, 0.0
 
         try:
-            h, w, _ = frame.shape
+            # Resize to model input size
+            img = cv2.resize(frame, (224, 224))
 
-            # ---- Center Crop ----
-            crop_fraction = 0.6
-            cw = int(w * crop_fraction)
-            ch = int(h * crop_fraction)
-            x1 = (w - cw) // 2
-            y1 = (h - ch) // 2
+            # Create blob (NCHW)
+            blob = cv2.dnn.blobFromImage(
+                img,
+                scalefactor=1/255.0,
+                size=(224, 224),
+                swapRB=False,
+                crop=False
+            )
 
-            crop = frame[y1:y1 + ch, x1:x1 + cw]
-
-            # ---- Resize to model input ----
-            img = cv2.resize(crop, (224, 224))
-
-            # BGR → RGB (important for TF models)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-            # Normalize
-            img = img.astype(np.float32) / 255.0
-
-            # HWC → CHW
-            blob = np.transpose(img, (2, 0, 1))
-
-            # Add batch dimension
-            blob = np.expand_dims(blob, axis=0)
-
-            print("Blob shape:", blob.shape)   # temporary debug
+            # ✅ VERY IMPORTANT:
+            # Convert NCHW -> NHWC for TensorFlow-exported ONNX
+            blob = blob.transpose(0, 2, 3, 1)
 
             self.net.setInput(blob)
             output = self.net.forward()[0]
@@ -106,19 +83,14 @@ class SignDetector:
             class_id = int(np.argmax(output))
             confidence = float(output[class_id])
 
-            raw_label = self.class_names[class_id]
-            mapped_label = self.label_map.get(raw_label, None)
-            print("Blob shape:", blob.shape)
+            label = self.class_names[class_id]
 
-            if mapped_label is None:
-                return None, 0.0
-
+            # Confidence filter
             if confidence < self.conf_threshold:
                 return None, confidence
 
-            return mapped_label, confidence
+            return label, confidence
 
         except Exception as e:
             print("SignDetector detect error:", e)
-            print("Blob shape:", blob.shape)
             return None, 0.0
