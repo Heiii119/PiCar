@@ -1,6 +1,5 @@
 # controller.py
 import time
-import math
 
 # =========================
 # PCA9685 / PWM CONFIG
@@ -27,7 +26,6 @@ START_STEERING_TICKS = STEERING_CENTER
 
 STOP_ON_EXIT = True
 
-STEP = 5
 STEERING_STEP = 25
 
 # =========================
@@ -54,6 +52,9 @@ class RobotController:
         self.throttle = START_THROTTLE_TICKS
         self.steering = START_STEERING_TICKS
 
+        # ✅ Manual speed from slider
+        self.manual_speed_pwm = 410
+
         # ---- Control parameters ----
         self.deadband = 10
         self.max_offset = 160
@@ -73,17 +74,14 @@ class RobotController:
     # =========================
     def _init_pwm(self):
         try:
-            if DRIVER_PREFER == "smbus2":
-                from smbus2 import SMBus
-                import adafruit_pca9685
-                import board
-                import busio
+            from smbus2 import SMBus
+            import adafruit_pca9685
+            import board
+            import busio
 
-                i2c = busio.I2C(board.SCL, board.SDA)
-                self.pwm = adafruit_pca9685.PCA9685(i2c)
-                self.pwm.frequency = PCA9685_FREQ
-            else:
-                raise Exception("Unsupported driver")
+            i2c = busio.I2C(board.SCL, board.SDA)
+            self.pwm = adafruit_pca9685.PCA9685(i2c)
+            self.pwm.frequency = PCA9685_FREQ
 
         except Exception as e:
             print("PWM init failed:", e)
@@ -98,44 +96,43 @@ class RobotController:
 
         self.pwm.channels[THROTTLE_CHANNEL].duty_cycle = throttle
         self.pwm.channels[STEERING_CHANNEL].duty_cycle = steering
-    
-    def set_manual_speed(self, pwm):
-        self.manual_speed_pwm = pwm
+
     # =========================
-    # PUBLIC UPDATE (Main Entry)
+    # SET MANUAL SPEED (Slider)
+    # =========================
+    def set_manual_speed(self, pwm):
+        self.manual_speed_pwm = int(pwm)
+
+    # =========================
+    # MAIN UPDATE
     # =========================
     def update(self, offset, sign_label=None, confidence=0.0):
-        """
-        Called from main loop.
-        offset: line center offset (pixels)
-        sign_label: detected sign
-        """
 
         if self.autopilot_enabled:
             self._apply_sign_mode(sign_label)
             self._compute_and_drive_discrete(offset)
-        else:
-            # Manual mode does not use offset
-            pass
+        # Manual mode does nothing here
 
     # =========================
     # MANUAL CONTROL
     # =========================
     def manual_key(self, key):
-        """
-        Call this from web when arrow keys pressed.
-        key: 'up', 'down', 'left', 'right', 'stop'
-        """
+
         self.autopilot_enabled = False
 
         if key == "up":
-            self.throttle += STEP
+            # ✅ Use slider speed
+            self.throttle = self.manual_speed_pwm
+
         elif key == "down":
-            self.throttle -= STEP
+            self.throttle = THROTTLE_REVERSE
+
         elif key == "left":
             self.steering -= STEERING_STEP
+
         elif key == "right":
             self.steering += STEERING_STEP
+
         elif key == "stop":
             self.throttle = THROTTLE_STOPPED
 
@@ -151,7 +148,7 @@ class RobotController:
         self.steering = max(STEERING_MIN, min(STEERING_MAX, self.steering))
 
     # =========================
-    # APPLY SIGN MODE
+    # SIGN MODE HANDLING
     # =========================
     def _apply_sign_mode(self, label):
 
@@ -165,7 +162,7 @@ class RobotController:
         elif label == "slow":
             self.current_mode = MODE_SLOW
 
-        elif label == "uturn":
+        elif label == "Uturn":
             self.current_mode = MODE_UTURN
             self.mode_timer = time.time()
             self.uturn_stage = 0
@@ -174,7 +171,7 @@ class RobotController:
             self.current_mode = MODE_GO
 
     # =========================
-    # DISCRETE CONTROLLER
+    # AUTOPILOT CONTROLLER
     # =========================
     def _compute_and_drive_discrete(self, offset):
 
@@ -196,6 +193,7 @@ class RobotController:
 
         # ---- UTURN MODE ----
         elif self.current_mode == MODE_UTURN:
+
             if self.uturn_stage == 0:
                 self.throttle = THROTTLE_STOPPED
                 if now - self.mode_timer > 1.0:
@@ -207,7 +205,6 @@ class RobotController:
                 self.steering = STEERING_MAX
                 if now - self.mode_timer > 2.0:
                     self.uturn_stage = 2
-                    self.mode_timer = now
 
             elif self.uturn_stage == 2:
                 self.current_mode = MODE_LINE
@@ -216,7 +213,7 @@ class RobotController:
         else:
             self.throttle = THROTTLE_FORWARD
 
-        # ---- Steering Discrete Logic ----
+        # ---- Steering ----
         if abs(offset) < self.deadband:
             self.steering = STEERING_CENTER
         elif offset > 0:
