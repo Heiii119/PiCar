@@ -10,14 +10,41 @@ from tflite_runtime.interpreter import Interpreter, load_delegate
 # CONFIG
 # =========================================================
 
-MODEL_PATH = "model.tflite"
-
-CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 CONF_THRESHOLD = 0.75
+SMOOTHING_FRAMES = 3  # require same label X frames before action
 
 CURRENT_LABEL = "None"
 CURRENT_CONF = 0.0
 MODE = "MANUAL"
+
+# =========================================================
+# PATH SETUP
+# =========================================================
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(SCRIPT_DIR, "model_edgetpu.tflite")
+LABEL_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
+
+print("Loading model from:", MODEL_PATH)
+print("Model exists:", os.path.exists(MODEL_PATH))
+print("Labels exist:", os.path.exists(LABEL_PATH))
+
+# =========================================================
+# LOAD LABELS
+# =========================================================
+
+def load_labels(path):
+    labels = {}
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            index, name = line.split(maxsplit=1)
+            labels[int(index)] = name
+    return labels
+
+LABELS = load_labels(LABEL_PATH)
 
 # =========================================================
 # LOAD CORAL MODEL
@@ -34,8 +61,11 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 input_shape = input_details[0]['shape']
 
+print("✅ Coral model loaded")
+print("Input shape:", input_shape)
+
 # =========================================================
-# PiCar
+# CAR CLASS
 # =========================================================
 
 class PiCar:
@@ -43,9 +73,13 @@ class PiCar:
     def __init__(self):
         self.auto_mode = False
         self.camera = cv2.VideoCapture(0)
+
         self.latest_frame = None
         self.lock = threading.Lock()
         self.running = True
+
+        self.last_label = None
+        self.same_count = 0
 
         threading.Thread(target=self.capture_loop, daemon=True).start()
         threading.Thread(target=self.inference_loop, daemon=True).start()
@@ -84,21 +118,32 @@ class PiCar:
 
             interpreter.set_tensor(input_details[0]['index'], input_tensor)
             interpreter.invoke()
-
             preds = interpreter.get_tensor(output_details[0]['index'])
 
             class_id = np.argmax(preds)
             confidence = float(preds[0][class_id])
 
             if confidence > CONF_THRESHOLD:
-                CURRENT_LABEL = CLASS_NAMES[class_id]
-                CURRENT_CONF = round(confidence, 2)
+                label = LABELS.get(class_id, "Unknown")
+
+                # ===== Smoothing logic =====
+                if label == self.last_label:
+                    self.same_count += 1
+                else:
+                    self.same_count = 1
+                    self.last_label = label
+
+                if self.same_count >= SMOOTHING_FRAMES:
+                    CURRENT_LABEL = label
+                    CURRENT_CONF = round(confidence, 2)
+                    self.react_to_sign(label)
             else:
                 CURRENT_LABEL = "None"
                 CURRENT_CONF = 0.0
+                self.same_count = 0
 
     # ==========================
-    # PREPROCESS (INT8 MODEL)
+    # PREPROCESS (INT8)
     # ==========================
     def preprocess(self, frame):
         _, height, width, _ = input_shape
@@ -107,6 +152,24 @@ class PiCar:
         frame = np.expand_dims(frame, axis=0)
         frame = frame.astype(np.uint8)
         return frame
+
+    # ==========================
+    # CAR REACTION LOGIC
+    # ==========================
+    def react_to_sign(self, label):
+        print("Detected:", label)
+
+        if label == "stop":
+            print("STOP action")
+
+        elif label == "slow":
+            print("SLOW action")
+
+        elif label == "uturn":
+            print("UTURN action")
+
+        elif label == "person":
+            print("PERSON detected")
 
     def get_frame(self):
         with self.lock:
