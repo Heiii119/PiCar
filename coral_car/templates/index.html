@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RC Car AI</title>
+    <style>
+        body {
+            background: #111;
+            color: white;
+            text-align: center;
+            font-family: Arial;
+        }
+        img {
+            width: 80%;
+            border: 4px solid white;
+            margin-top: 20px;
+        }
+        .btn {
+            padding: 15px 30px;
+            font-size: 18px;
+            margin: 10px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .start {
+            background-color: #28a745;
+            color: white;
+        }
+        .stop {
+            background-color: #dc3545;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>RC Car Live Stream</h1>
+
+    <div>
+        <button class="btn start" onclick="startCar()">START</button>
+        <button class="btn stop" onclick="stopCar()">STOP</button>
+    </div>
+
+    <img src="/video">
+
+    <script>
+        function startCar() {
+            fetch('/start', { method: 'POST' })
+                .then(response => console.log("Car Started"));
+        }
+
+        function stopCar() {
+            fetch('/stop', { method: 'POST' })
+                .then(response => console.log("Car Stopped"));
+        }
+    </script>
+
+</body>
+</html>
