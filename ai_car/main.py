@@ -149,66 +149,230 @@ def autopilot():
 @app.route("/")
 def index():
     return """
-    <html>
-    <head>
-        <title>Robot Control</title>
-    </head>
-    <body>
-        <h1>Autonomous Car Control</h1>
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autonomous Car Control</title>
 
-        <img src="/video" width="480"/>
+<style>
 
-        <h3>Status</h3>
-        <div>Offset: <span id="offset"></span></div>
-        <div>Sign: <span id="sign"></span></div>
-        <div>Confidence: <span id="conf"></span></div>
-        <div>Mode: <span id="mode"></span></div>
-        <div>Autopilot: <span id="auto"></span></div>
+body {
+    font-family: Arial, sans-serif;
+    text-align: center;
+    background-color: #f2f2f2;
+    margin: 0;
+    padding: 10px;
+}
 
-        <br>
-        <button onclick="setAutopilot(true)">Enable Autopilot</button>
-        <button onclick="setAutopilot(false)">Disable Autopilot</button>
+h1 {
+    margin-top: 10px;
+}
 
-        <script>
-        async function updateStatus(){
-            const res = await fetch('/status');
-            const data = await res.json();
-            document.getElementById('offset').textContent = data.offset;
-            document.getElementById('sign').textContent = data.sign;
-            document.getElementById('conf').textContent = data.confidence;
-            document.getElementById('mode').textContent = data.mode;
-            document.getElementById('auto').textContent = data.autopilot;
-        }
+img {
+    width: 100%;
+    max-width: 500px;
+    border: 3px solid #333;
+    border-radius: 10px;
+}
 
-        setInterval(updateStatus, 500);
+.mode-container {
+    margin-top: 20px;
+}
 
-        function sendKey(key){
-            fetch('/manual', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({key:key})
-            });
-        }
+.mode-btn {
+    padding: 15px 25px;
+    font-size: 18px;
+    margin: 10px;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    width: 180px;
+}
 
-        function setAutopilot(enabled){
-            fetch('/autopilot', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({enabled:enabled})
-            });
-        }
+.active-auto {
+    background-color: #28a745;
+    color: white;
+}
 
-        document.addEventListener('keydown', function(e){
-            if(e.key === "ArrowUp") sendKey("up");
-            if(e.key === "ArrowDown") sendKey("down");
-            if(e.key === "ArrowLeft") sendKey("left");
-            if(e.key === "ArrowRight") sendKey("right");
-            if(e.key === " ") sendKey("stop");
-        });
-        </script>
-    </body>
-    </html>
-    """
+.active-manual {
+    background-color: #007bff;
+    color: white;
+}
+
+.inactive {
+    background-color: #ccc;
+}
+
+.arrow-grid {
+    margin-top: 30px;
+    display: inline-grid;
+    grid-template-columns: 120px 120px 120px;
+    grid-template-rows: 120px 120px 120px;
+    gap: 15px;
+}
+
+.arrow-btn {
+    font-size: 40px;
+    border-radius: 15px;
+    border: none;
+    background-color: #444;
+    color: white;
+    cursor: pointer;
+}
+
+.arrow-btn:active {
+    background-color: #222;
+}
+
+.stop-btn {
+    background-color: red;
+    color: white;
+    font-size: 26px;
+    padding: 20px;
+    border-radius: 15px;
+    margin-top: 20px;
+    width: 260px;
+    border: none;
+}
+
+.slider-container {
+    margin-top: 25px;
+}
+
+input[type=range] {
+    width: 80%;
+    max-width: 400px;
+}
+
+.status-box {
+    margin-top: 20px;
+    font-size: 16px;
+}
+
+@media (max-width: 600px) {
+    .arrow-grid {
+        grid-template-columns: 100px 100px 100px;
+        grid-template-rows: 100px 100px 100px;
+    }
+    .arrow-btn {
+        font-size: 35px;
+    }
+}
+
+</style>
+</head>
+
+<body>
+
+<h1>🚗 Autonomous Car Control</h1>
+
+<img src="/video">
+
+<div class="mode-container">
+    <button id="autoBtn" class="mode-btn inactive" onclick="enableAutopilot()">Autopilot</button>
+    <button id="manualBtn" class="mode-btn inactive" onclick="enableManual()">Manual</button>
+</div>
+
+<div class="arrow-grid" id="manualControls">
+
+    <div></div>
+    <button class="arrow-btn" onclick="sendKey('up')">↑</button>
+    <div></div>
+
+    <button class="arrow-btn" onclick="sendKey('left')">←</button>
+    <button class="arrow-btn" onclick="sendKey('stop')">■</button>
+    <button class="arrow-btn" onclick="sendKey('right')">→</button>
+
+    <div></div>
+    <button class="arrow-btn" onclick="sendKey('down')">↓</button>
+    <div></div>
+
+</div>
+
+<button class="stop-btn" onclick="emergencyStop()">EMERGENCY STOP</button>
+
+<div class="slider-container">
+    <h3>Manual Speed (PWM)</h3>
+    <input type="range" min="400" max="420" value="410" id="speedSlider"
+           oninput="updateSpeed(this.value)">
+    <div>PWM: <span id="speedValue">410</span></div>
+</div>
+
+<div class="status-box">
+    <div>Mode: <span id="mode"></span></div>
+    <div>Autopilot: <span id="auto"></span></div>
+    <div>Sign: <span id="sign"></span></div>
+</div>
+
+<script>
+
+const autoBtn = document.getElementById("autoBtn");
+const manualBtn = document.getElementById("manualBtn");
+const manualControls = document.getElementById("manualControls");
+
+function enableAutopilot(){
+    fetch('/autopilot', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({enabled:true})
+    });
+
+    autoBtn.className = "mode-btn active-auto";
+    manualBtn.className = "mode-btn inactive";
+    manualControls.style.opacity = 0.4;
+}
+
+function enableManual(){
+    fetch('/autopilot', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({enabled:false})
+    });
+
+    manualBtn.className = "mode-btn active-manual";
+    autoBtn.className = "mode-btn inactive";
+    manualControls.style.opacity = 1.0;
+}
+
+function sendKey(key){
+    fetch('/manual', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({key:key})
+    });
+}
+
+function emergencyStop(){
+    sendKey("stop");
+}
+
+function updateSpeed(value){
+    document.getElementById("speedValue").innerText = value;
+
+    fetch('/manual_speed', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({pwm:value})
+    });
+}
+
+async function updateStatus(){
+    const res = await fetch('/status');
+    const data = await res.json();
+
+    document.getElementById('mode').textContent = data.mode;
+    document.getElementById('auto').textContent = data.autopilot;
+    document.getElementById('sign').textContent = data.sign;
+}
+
+setInterval(updateStatus, 500);
+
+</script>
+
+</body>
+</html>
+"""
 
 
 # =========================
