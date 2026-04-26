@@ -22,7 +22,7 @@ MODE = "MANUAL"
 # =========================================================
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(SCRIPT_DIR, "model_edgetpu.tflite")
+MODEL_PATH = os.path.join(SCRIPT_DIR, "model.tflite")
 LABEL_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 
 print("Loading model from:", MODEL_PATH)
