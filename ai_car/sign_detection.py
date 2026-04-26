@@ -9,16 +9,14 @@ class SignDetector:
 
     def __init__(self,
                  model_path="model.onnx",
-                 conf_threshold=0.75,
-                 inference_interval=4):
+                 conf_threshold=0.75):
 
         self.model_path = model_path
         self.conf_threshold = conf_threshold
-        self.inference_interval = inference_interval
 
         self.net = None
 
-        # Class order MUST match training
+        # MUST match training order exactly
         self.class_names = [
             "background",
             "stop",
@@ -28,17 +26,10 @@ class SignDetector:
             "go"
         ]
 
-        # Frame counter
-        self.frame_count = 0
-
-        # Store last detection result
-        self.last_label = None
-        self.last_conf = 0.0
-
         self._load_model()
 
     # ======================================================
-    # LOAD MODEL
+    # LOAD ONNX MODEL
     # ======================================================
 
     def _load_model(self):
@@ -56,23 +47,24 @@ class SignDetector:
             self.net = None
 
     # ======================================================
-    # DETECT (runs every N frames)
+    # SIGN DETECTION (NHWC FIX FOR TF ONNX)
     # ======================================================
 
     def detect(self, frame):
+        """
+        Returns:
+            label (str or None)
+            confidence (float)
+        """
 
         if self.net is None:
             return None, 0.0
 
-        self.frame_count += 1
-
-        # ✅ Only run inference every N frames
-        if self.frame_count % self.inference_interval != 0:
-            return self.last_label, self.last_conf
-
         try:
+            # Resize to model input size
             img = cv2.resize(frame, (224, 224))
 
+            # Create blob (NCHW)
             blob = cv2.dnn.blobFromImage(
                 img,
                 scalefactor=1/255.0,
@@ -81,7 +73,8 @@ class SignDetector:
                 crop=False
             )
 
-            # NCHW -> NHWC (required for your model)
+            # ✅ VERY IMPORTANT:
+            # Convert NCHW -> NHWC for TensorFlow-exported ONNX
             blob = blob.transpose(0, 2, 3, 1)
 
             self.net.setInput(blob)
@@ -89,17 +82,15 @@ class SignDetector:
 
             class_id = int(np.argmax(output))
             confidence = float(output[class_id])
+
             label = self.class_names[class_id]
 
-            if confidence >= self.conf_threshold:
-                self.last_label = label
-                self.last_conf = confidence
-            else:
-                self.last_label = None
-                self.last_conf = confidence
+            # Confidence filter
+            if confidence < self.conf_threshold:
+                return None, confidence
 
-            return self.last_label, self.last_conf
+            return label, confidence
 
         except Exception as e:
             print("SignDetector detect error:", e)
-            return self.last_label, self.last_conf
+            return None, 0.0
