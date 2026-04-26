@@ -94,7 +94,7 @@ class SignDetector:
 
             # Convert HWC → NCHW
             blob = np.transpose(img, (2, 0, 1))
-            blob = np.expand_dims(blob, axis=0)
+            blob = np.expand_dims(IMG, axis=0)
 
             self.net.setInput(blob)
             output = self.net.forward()[0]
@@ -104,6 +104,7 @@ class SignDetector:
 
             raw_label = self.class_names[class_id]
             mapped_label = self.label_map.get(raw_label, None)
+            print("Blob shape:", blob.shape)
 
             if mapped_label is None:
                 return None, 0.0
@@ -115,4 +116,5 @@ class SignDetector:
 
         except Exception as e:
             print("SignDetector detect error:", e)
+            print("Blob shape:", blob.shape)
             return None, 0.0
