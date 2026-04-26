@@ -98,7 +98,9 @@ class RobotController:
 
         self.pwm.channels[THROTTLE_CHANNEL].duty_cycle = throttle
         self.pwm.channels[STEERING_CHANNEL].duty_cycle = steering
-
+    
+    def set_manual_speed(self, pwm):
+        self.manual_speed_pwm = pwm
     # =========================
     # PUBLIC UPDATE (Main Entry)
     # =========================
