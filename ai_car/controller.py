@@ -215,7 +215,7 @@ class RobotController:
             # Stage 0 → Stop 0.2 sec
             if self.uturn_stage == 0:
                 self.throttle = THROTTLE_STOPPED
-                self.steering = STEERING_CENTER
+                self.steering = STEERING_MAX
 
                 if now - self.mode_timer > 0.2:
                     self.uturn_stage = 1
@@ -230,24 +230,27 @@ class RobotController:
                     self.uturn_stage = 2
                     self.mode_timer = now
 
-            # Stage 2 → Left + Backward (3 sec)
+            
+
+            # Stage 2 → Stop 0.2 sec
             elif self.uturn_stage == 2:
-                self.throttle = THROTTLE_REVERSE
+                self.throttle = THROTTLE_STOPPED
                 self.steering = STEERING_MIN
 
                 if now - self.mode_timer > 3.0:
                     self.uturn_stage = 3
                     self.mode_timer = now
+                
 
-            # Stage 3 → Stop 0.2 sec
+            # Stage 3 → Left + Backward (3 sec)
             elif self.uturn_stage == 3:
-                self.throttle = THROTTLE_STOPPED
-                self.steering = STEERING_CENTER
+                self.throttle = THROTTLE_REVERSE
+                self.steering = STEERING_MIN
 
                 if now - self.mode_timer > 0.2:
                     self.current_mode = MODE_LINE
                     self.uturn_stage = 0
-
+            
             self._apply_pwm(self.throttle, self.steering)
             return  # IMPORTANT → skip normal steering logic
 
