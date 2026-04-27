@@ -8,17 +8,8 @@ class LineDetector:
     def __init__(self):
 
         # ----- Detection mode -----
-        # "gray" or "hsv"
-        self.mode = "gray"
-
-        # ----- Gray settings -----
-        self.gray_threshold = 120
-
-        # ----- HSV settings -----
-        self.hue_low = 15
-        self.hue_high = 40
-        self.sat_min = 50
-        self.val_min = 50
+        # "hsv_distance" or "red_bgr"
+        self.mode = "hsv_distance"
 
         # ----- ROI -----
         self.roi_ratio = 0.5
@@ -26,9 +17,20 @@ class LineDetector:
         # ----- Morphology -----
         self.kernel = np.ones((5, 5), np.uint8)
 
+        # ----- HSV Distance Settings -----
+        self.target_hsv = None
+        self.hsv_distance_threshold = 40
+
+        # ----- BGR Red Dominance Settings -----
+        self.red_margin = 40
+
         # ----- Calibration -----
-        self.offset_bias = 0          # ✅ calibration correction
-        self.last_offset = 0          # ✅ store last valid offset
+        self.offset_bias = 0
+        self.last_offset = 0
+
+        # ----- Smoothing -----
+        self.smoothed_offset = 0
+        self.alpha = 0.6  # smoothing factor
 
         # ----- Debug -----
         self.last_mask = None
@@ -37,24 +39,19 @@ class LineDetector:
     # PUBLIC PROCESS FUNCTION
     # =========================================
     def process(self, frame):
-        """
-        Returns:
-            offset (int)
-            debug_frame (BGR image)
-        """
 
         h, w, _ = frame.shape
 
-        # ---- ROI (bottom part of image) ----
+        # ---- ROI (bottom part) ----
         roi_top = int(h * (1 - self.roi_ratio))
         roi = frame[roi_top:h, :]
         roi_center_x = w // 2
 
         # ---- Select pipeline ----
-        if self.mode == "gray":
-            mask = self._gray_pipeline(roi)
+        if self.mode == "hsv_distance":
+            mask = self._hsv_distance_pipeline(roi)
         else:
-            mask = self._hsv_pipeline(roi)
+            mask = self._red_bgr_pipeline(roi)
 
         self.last_mask = mask
 
@@ -62,45 +59,60 @@ class LineDetector:
 
         # ---- Offset calculation ----
         if center is None:
-            offset = self.last_offset  # ✅ keep last value if lost
+            offset = None
         else:
             raw_offset = center - roi_center_x
-            offset = raw_offset - self.offset_bias
+            corrected = raw_offset - self.offset_bias
+
+            # ✅ smoothing
+            self.smoothed_offset = (
+                self.alpha * corrected +
+                (1 - self.alpha) * self.smoothed_offset
+            )
+
+            offset = self.smoothed_offset
             self.last_offset = offset
 
         debug = self._make_debug_frame(frame, mask, center, roi_top)
 
-        return int(offset), debug
+        return offset, debug
 
     # =========================================
-    # GRAY PIPELINE
+    # ✅ HSV DISTANCE PIPELINE
     # =========================================
-    def _gray_pipeline(self, roi):
+    def _hsv_distance_pipeline(self, roi):
 
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-        _, binary = cv2.threshold(
-            gray,
-            self.gray_threshold,
-            255,
-            cv2.THRESH_BINARY_INV
-        )
-
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.kernel)
-
-        return binary
-
-    # =========================================
-    # HSV PIPELINE
-    # =========================================
-    def _hsv_pipeline(self, roi):
+        if self.target_hsv is None:
+            return np.zeros(roi.shape[:2], dtype=np.uint8)
 
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-        lower = np.array([self.hue_low, self.sat_min, self.val_min])
-        upper = np.array([self.hue_high, 255, 255])
+        # Compute distance in HSV space
+        diff = hsv.astype(np.float32) - self.target_hsv
+        distance = np.linalg.norm(diff, axis=2)
 
-        mask = cv2.inRange(hsv, lower, upper)
+        mask = np.zeros_like(distance, dtype=np.uint8)
+        mask[distance < self.hsv_distance_threshold] = 255
+
+        # Morphology
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+
+        return mask
+
+    # =========================================
+    # ✅ BGR RED DOMINANCE PIPELINE
+    # =========================================
+    def _red_bgr_pipeline(self, roi):
+
+        b, g, r = cv2.split(roi)
+
+        mask = np.zeros_like(r, dtype=np.uint8)
+
+        red_pixels = (r > g + self.red_margin) & (r > b + self.red_margin)
+        mask[red_pixels] = 255
+
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
 
         return mask
@@ -110,12 +122,26 @@ class LineDetector:
     # =========================================
     def _find_line_center(self, mask):
 
-        moments = cv2.moments(mask)
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
 
-        if moments["m00"] == 0:
+        if not contours:
             return None
 
-        cx = int(moments["m10"] / moments["m00"])
+        largest = max(contours, key=cv2.contourArea)
+
+        if cv2.contourArea(largest) < 300:
+            return None
+
+        M = cv2.moments(largest)
+
+        if M["m00"] == 0:
+            return None
+
+        cx = int(M["m10"] / M["m00"])
         return cx
 
     # =========================================
@@ -127,24 +153,11 @@ class LineDetector:
         h, w, _ = frame.shape
 
         # Draw ROI
-        cv2.rectangle(
-            debug,
-            (0, roi_top),
-            (w, h),
-            (0, 255, 0),
-            2
-        )
+        cv2.rectangle(debug, (0, roi_top), (w, h), (0, 255, 0), 2)
 
-        # Draw frame center
-        cv2.line(
-            debug,
-            (w // 2, roi_top),
-            (w // 2, h),
-            (255, 0, 0),
-            2
-        )
+        # Draw image center
+        cv2.line(debug, (w // 2, roi_top), (w // 2, h), (255, 0, 0), 2)
 
-        # Draw detected line center
         if center is not None:
             cv2.circle(
                 debug,
@@ -154,26 +167,40 @@ class LineDetector:
                 -1
             )
 
-        # Draw calibrated center line
         calibrated_center = (w // 2) + self.offset_bias
-        cv2.line(
-            debug,
-            (calibrated_center, roi_top),
-            (calibrated_center, h),
-            (0, 255, 255),
-            2
-        )
+        cv2.line(debug,
+                 (calibrated_center, roi_top),
+                 (calibrated_center, h),
+                 (0, 255, 255),
+                 2)
 
         return debug
 
     # =========================================
-    # ✅ CALIBRATION FUNCTION
+    # ✅ COLOR CALIBRATION (HSV)
+    # =========================================
+    def calibrate_color(self, frame):
+
+        h, w, _ = frame.shape
+
+        roi_top = int(h * (1 - self.roi_ratio))
+        roi = frame[roi_top:h, :]
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        box = hsv[
+            roi.shape[0]//2 - 20 : roi.shape[0]//2 + 20,
+            w//2 - 20 : w//2 + 20
+        ]
+
+        self.target_hsv = box.mean(axis=(0, 1))
+
+        print("✅ HSV color calibrated:", self.target_hsv)
+
+    # =========================================
+    # CENTER CALIBRATION
     # =========================================
     def calibrate_center(self):
-        """
-        Sets current offset as new zero.
-        Car must be centered on line when pressed.
-        """
         self.offset_bias += self.last_offset
         print("✅ Line center calibrated")
 
@@ -182,17 +209,8 @@ class LineDetector:
         print("✅ Line calibration reset")
 
     # =========================================
-    # SETTINGS UPDATE
+    # SETTINGS
     # =========================================
-    def set_gray_threshold(self, value):
-        self.gray_threshold = int(value)
-
-    def set_hsv_range(self, h_low, h_high, s_min, v_min):
-        self.hue_low = int(h_low)
-        self.hue_high = int(h_high)
-        self.sat_min = int(s_min)
-        self.val_min = int(v_min)
-
     def set_mode(self, mode):
-        if mode in ["gray", "hsv"]:
+        if mode in ["hsv_distance", "red_bgr"]:
             self.mode = mode
