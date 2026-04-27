@@ -49,7 +49,11 @@ class RobotController:
         self.mode_timer = 0.0
         self.uturn_stage = 0
         self.uturn_cooldown_timer = 0.0
-        self.uturn_cooldown_time = 6.0   # seconds cooldown
+        self.uturn_cooldown_time = 8.0   # seconds cooldown
+
+        # ✅ LINE LOST PROTECTION
+        self.line_lost_timer = None
+        self.line_lost_timeout = 3.0   # seconds
 
         # PWM
         self.pwm = None
@@ -168,7 +172,7 @@ class RobotController:
             self.throttle = THROTTLE_FORWARD
 
         # =========================
-        # ✅ UTURN MODE (FIXED)
+        # ✅ UTURN MODE 
         # =========================
         elif self.current_mode == MODE_UTURN:
 
@@ -219,6 +223,30 @@ class RobotController:
         else:
             self.throttle = THROTTLE_SLOW
 
+            # =========================
+            # ✅ LINE LOST DETECTION
+            # =========================
+            if offset is None:
+        
+                # Start timer if first time lost
+                if self.line_lost_timer is None:
+                    self.line_lost_timer = time.time()
+                    print("⚠ Line lost...")
+        
+                # If lost too long → disable autopilot
+                elif time.time() - self.line_lost_timer > self.line_lost_timeout:
+                    print("❌ Line lost for 3 seconds → Switching to MANUAL")
+        
+                    self.stop()
+                    self.autopilot_enabled = False
+                    self.line_lost_timer = None
+                    return
+        
+            else:
+                # Line detected again → reset timer
+                self.line_lost_timer = None
+
+        
         # =========================
         # STEERING CONTROL
         # =========================
