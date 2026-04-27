@@ -54,7 +54,7 @@ class RobotController:
         # Control parameters
         self.deadband = 10
 
-        # Uturn timers
+        # U-turn state machine
         self.mode_timer = 0.0
         self.uturn_stage = 0
 
@@ -65,22 +65,21 @@ class RobotController:
         self._apply_pwm(self.throttle, self.steering)
 
     # =========================
-    # PWM INIT (LEGACY DRIVER)
+    # PWM INIT
     # =========================
     def _init_pwm(self):
         try:
             import Adafruit_PCA9685
-    
-            # ✅ Force I2C bus 1 (important fix)
+
             self.pwm = Adafruit_PCA9685.PCA9685(
                 address=PCA9685_ADDR,
                 busnum=1
             )
-    
+
             self.pwm.set_pwm_freq(PCA9685_FREQ)
-    
-            print("✅ PCA9685 initialized (Legacy driver, bus=1)")
-    
+
+            print("✅ PCA9685 initialized")
+
         except Exception as e:
             import traceback
             print("❌ PWM INIT FAILED")
@@ -88,7 +87,7 @@ class RobotController:
             self.pwm = None
 
     # =========================
-    # APPLY PWM (12-bit)
+    # APPLY PWM
     # =========================
     def _apply_pwm(self, throttle, steering):
 
@@ -98,24 +97,27 @@ class RobotController:
         throttle = int(max(0, min(4095, throttle)))
         steering = int(max(0, min(4095, steering)))
 
-        # Legacy driver uses raw 12-bit ticks
         self.pwm.set_pwm(THROTTLE_CHANNEL, 0, throttle)
         self.pwm.set_pwm(STEERING_CHANNEL, 0, steering)
 
     # =========================
-    # SET MANUAL SPEED
+    # MANUAL SPEED
     # =========================
     def set_manual_speed(self, pwm):
-        self.manual_speed_pwm = int(max(THROTTLE_REVERSE, min(THROTTLE_FORWARD, pwm)))
+        self.manual_speed_pwm = int(
+            max(THROTTLE_REVERSE, min(THROTTLE_FORWARD, pwm))
+        )
 
     # =========================
-    # MAIN UPDATE (Autopilot)
+    # MAIN UPDATE
     # =========================
     def update(self, offset, sign_label=None, confidence=0.0):
 
-        if self.autopilot_enabled:
-            self._apply_sign_mode(sign_label)
-            self._compute_and_drive_discrete(offset)
+        if not self.autopilot_enabled:
+            return
+
+        self._apply_sign_mode(sign_label)
+        self._compute_and_drive_discrete(offset)
 
     # =========================
     # MANUAL CONTROL
@@ -152,7 +154,7 @@ class RobotController:
         self.steering = max(STEERING_MIN, min(STEERING_MAX, self.steering))
 
     # =========================
-    # SIGN MODE HANDLING
+    # SIGN HANDLING
     # =========================
     def _apply_sign_mode(self, label):
 
@@ -177,50 +179,96 @@ class RobotController:
             self.current_mode = MODE_GO
 
     # =========================
-    # AUTOPILOT CONTROLLER
+    # AUTOPILOT LOGIC
     # =========================
     def _compute_and_drive_discrete(self, offset):
 
         now = time.time()
 
+        # =========================
         # STOP MODE
+        # =========================
         if self.current_mode == MODE_STOP:
             self.throttle = THROTTLE_STOPPED
+            self.steering = STEERING_CENTER
+
             if now - self.mode_timer > 2.0:
                 self.current_mode = MODE_LINE
 
+        # =========================
         # SLOW MODE
+        # =========================
         elif self.current_mode == MODE_SLOW:
             self.throttle = THROTTLE_SLOW
 
+        # =========================
         # GO MODE
+        # =========================
         elif self.current_mode == MODE_GO:
             self.throttle = THROTTLE_FORWARD
 
-        # UTURN MODE
+        # =========================
+        # ✅ ADVANCED U-TURN MODE
+        # =========================
         elif self.current_mode == MODE_UTURN:
 
+            # Stage 0 → Stop 0.2 sec
             if self.uturn_stage == 0:
                 self.throttle = THROTTLE_STOPPED
-                if now - self.mode_timer > 1.0:
+                self.steering = STEERING_CENTER
+
+                if now - self.mode_timer > 0.2:
                     self.uturn_stage = 1
                     self.mode_timer = now
 
+            # Stage 1 → Right + Forward (3 sec)
             elif self.uturn_stage == 1:
-                self.throttle = THROTTLE_REVERSE
+                self.throttle = THROTTLE_FORWARD
                 self.steering = STEERING_MAX
-                if now - self.mode_timer > 2.0:
-                    self.current_mode = MODE_LINE
 
+                if now - self.mode_timer > 3.0:
+                    self.uturn_stage = 2
+                    self.mode_timer = now
+
+            # Stage 2 → Left + Backward (3 sec)
+            elif self.uturn_stage == 2:
+                self.throttle = THROTTLE_REVERSE
+                self.steering = STEERING_MIN
+
+                if now - self.mode_timer > 3.0:
+                    self.uturn_stage = 3
+                    self.mode_timer = now
+
+            # Stage 3 → Stop 0.2 sec
+            elif self.uturn_stage == 3:
+                self.throttle = THROTTLE_STOPPED
+                self.steering = STEERING_CENTER
+
+                if now - self.mode_timer > 0.2:
+                    self.current_mode = MODE_LINE
+                    self.uturn_stage = 0
+
+            self._apply_pwm(self.throttle, self.steering)
+            return  # IMPORTANT → skip normal steering logic
+
+        # =========================
         # NORMAL LINE MODE
+        # =========================
         else:
             self.throttle = THROTTLE_FORWARD
 
-        # Steering logic
-        if abs(offset) < self.deadband:
+        # =========================
+        # Steering Correction
+        # =========================
+        if offset is None:
             self.steering = STEERING_CENTER
+
+        elif abs(offset) < self.deadband:
+            self.steering = STEERING_CENTER
+
         elif offset > 0:
             self.steering = STEERING_CENTER + min(80, offset)
+
         else:
             self.steering = STEERING_CENTER + max(-80, offset)
 
