@@ -73,12 +73,17 @@ class RobotController:
     def _init_pwm(self):
         try:
             import Adafruit_PCA9685
-
-            self.pwm = Adafruit_PCA9685.PCA9685(address=PCA9685_ADDR)
+    
+            # ✅ Force I2C bus 1 (important fix)
+            self.pwm = Adafruit_PCA9685.PCA9685(
+                address=PCA9685_ADDR,
+                busnum=1
+            )
+    
             self.pwm.set_pwm_freq(PCA9685_FREQ)
-
-            print("✅ PCA9685 initialized (Legacy driver)")
-
+    
+            print("✅ PCA9685 initialized (Legacy driver, bus=1)")
+    
         except Exception as e:
             import traceback
             print("❌ PWM INIT FAILED")
