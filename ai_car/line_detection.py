@@ -21,11 +21,14 @@ class LineDetector:
         self.val_min = 50
 
         # ----- ROI -----
-        # percentage of lower image used
         self.roi_ratio = 0.5
 
         # ----- Morphology -----
         self.kernel = np.ones((5, 5), np.uint8)
+
+        # ----- Calibration -----
+        self.offset_bias = 0          # ✅ calibration correction
+        self.last_offset = 0          # ✅ store last valid offset
 
         # ----- Debug -----
         self.last_mask = None
@@ -43,9 +46,11 @@ class LineDetector:
         h, w, _ = frame.shape
 
         # ---- ROI (bottom part of image) ----
-        roi = frame[int(h * (1 - self.roi_ratio)):h, :]
+        roi_top = int(h * (1 - self.roi_ratio))
+        roi = frame[roi_top:h, :]
         roi_center_x = w // 2
 
+        # ---- Select pipeline ----
         if self.mode == "gray":
             mask = self._gray_pipeline(roi)
         else:
@@ -55,14 +60,17 @@ class LineDetector:
 
         center = self._find_line_center(mask)
 
+        # ---- Offset calculation ----
         if center is None:
-            offset = 0
+            offset = self.last_offset  # ✅ keep last value if lost
         else:
-            offset = center - roi_center_x
+            raw_offset = center - roi_center_x
+            offset = raw_offset - self.offset_bias
+            self.last_offset = offset
 
-        debug = self._make_debug_frame(frame, mask, center)
+        debug = self._make_debug_frame(frame, mask, center, roi_top)
 
-        return offset, debug
+        return int(offset), debug
 
     # =========================================
     # GRAY PIPELINE
@@ -113,15 +121,12 @@ class LineDetector:
     # =========================================
     # DEBUG FRAME
     # =========================================
-    def _make_debug_frame(self, frame, mask, center):
+    def _make_debug_frame(self, frame, mask, center, roi_top):
 
         debug = frame.copy()
         h, w, _ = frame.shape
 
-        roi_top = int(h * (1 - self.roi_ratio))
-        roi_height = h - roi_top
-
-        # Draw ROI rectangle
+        # Draw ROI
         cv2.rectangle(
             debug,
             (0, roi_top),
@@ -130,7 +135,7 @@ class LineDetector:
             2
         )
 
-        # Draw center line of frame
+        # Draw frame center
         cv2.line(
             debug,
             (w // 2, roi_top),
@@ -139,19 +144,45 @@ class LineDetector:
             2
         )
 
+        # Draw detected line center
         if center is not None:
             cv2.circle(
                 debug,
-                (center, roi_top + roi_height // 2),
+                (center, roi_top + (h - roi_top) // 2),
                 8,
                 (0, 0, 255),
                 -1
             )
 
+        # Draw calibrated center line
+        calibrated_center = (w // 2) + self.offset_bias
+        cv2.line(
+            debug,
+            (calibrated_center, roi_top),
+            (calibrated_center, h),
+            (0, 255, 255),
+            2
+        )
+
         return debug
 
     # =========================================
-    # SETTINGS UPDATE (Optional)
+    # ✅ CALIBRATION FUNCTION
+    # =========================================
+    def calibrate_center(self):
+        """
+        Sets current offset as new zero.
+        Car must be centered on line when pressed.
+        """
+        self.offset_bias += self.last_offset
+        print("✅ Line center calibrated")
+
+    def reset_calibration(self):
+        self.offset_bias = 0
+        print("✅ Line calibration reset")
+
+    # =========================================
+    # SETTINGS UPDATE
     # =========================================
     def set_gray_threshold(self, value):
         self.gray_threshold = int(value)
