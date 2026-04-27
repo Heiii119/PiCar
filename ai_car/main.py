@@ -179,20 +179,40 @@ img {
     border: 3px solid #333;
     border-radius: 10px;
 }
+.mode-container {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    margin-top: 20px;
+}
 
 .mode-btn {
     padding: 15px 25px;
     font-size: 18px;
-    margin: 10px;
     border: none;
     border-radius: 10px;
     cursor: pointer;
-    width: 180px;
+    width: 160px;
+    transition: 0.2s;
 }
 
-.active-auto { background-color: #28a745; color: white; }
-.active-manual { background-color: #007bff; color: white; }
-.inactive { background-color: #ccc; }
+/* Default state */
+.mode-btn {
+    background-color: #ccc;
+    color: black;
+}
+
+/* Autopilot active */
+.mode-btn.active-auto {
+    background-color: #28a745;
+    color: white;
+}
+
+/* Manual active */
+.mode-btn.active-manual {
+    background-color: #007bff;
+    color: white;
+}
 
 .arrow-grid {
     margin-top: 30px;
@@ -249,8 +269,16 @@ input[type=range] {
 
 <br>
 
-<button id="autoBtn" class="mode-btn inactive" onclick="enableAutopilot()">Autopilot</button>
-<button id="manualBtn" class="mode-btn active-manual" onclick="enableManual()">Manual</button>
+<div style="margin-top:20px;">
+Mode: <span id="mode"></span> |
+Autopilot: <span id="auto"></span> |
+Sign: <span id="sign"></span>
+</div>
+
+<div class="mode-container">
+    <button id="autoBtn" class="mode-btn active-auto" onclick="enableAutopilot()">Autopilot</button>
+    <button id="manualBtn" class="mode-btn inactive" onclick="enableManual()">Manual</button>
+</div>
 
 <div class="arrow-grid">
     <div></div>
@@ -275,11 +303,7 @@ input[type=range] {
 
 <button class="calibrate-btn" onclick="calibrateLine()">Calibrate Line</button>
 
-<div style="margin-top:20px;">
-Mode: <span id="mode"></span> |
-Autopilot: <span id="auto"></span> |
-Sign: <span id="sign"></span>
-</div>
+
 
 <script>
 // ✅ Disable pinch zoom
@@ -329,11 +353,11 @@ function enableAutopilot(){
         body: JSON.stringify({enabled:true})
     });
 
-    autoBtn.classList.remove("inactive", "active-manual");
     autoBtn.classList.add("active-auto");
+    autoBtn.classList.remove("active-manual");
 
-    manualBtn.classList.remove("active-manual", "active-auto");
-    manualBtn.classList.add("inactive");
+    manualBtn.classList.remove("active-manual");
+    manualBtn.classList.remove("active-auto");
 }
 
 
@@ -345,11 +369,11 @@ function enableManual(){
         body: JSON.stringify({enabled:false})
     });
 
-    manualBtn.classList.remove("inactive", "active-auto");
     manualBtn.classList.add("active-manual");
+    manualBtn.classList.remove("active-auto");
 
-    autoBtn.classList.remove("active-auto", "active-manual");
-    autoBtn.classList.add("inactive");
+    autoBtn.classList.remove("active-auto");
+    autoBtn.classList.remove("active-manual");
 }
 
 function calibrateLine(){
