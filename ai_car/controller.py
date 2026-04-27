@@ -75,21 +75,19 @@ class RobotController:
     def _init_pwm(self):
         try:
             from smbus2 import SMBus
-            import adafruit_pca9685
-            import board
-            import busio
-
-            i2c = busio.I2C(board.SCL, board.SDA)
-            self.pwm = adafruit_pca9685.PCA9685(i2c)
+            from adafruit_pca9685 import PCA9685
+        
+            bus = SMBus(1)  # I2C bus 1
+            self.pwm = PCA9685(bus, address=0x40)
             self.pwm.frequency = PCA9685_FREQ
-
+        
+            print("✅ PCA9685 initialized (SMBus mode)")
+        
         except Exception as e:
-            print("PWM init failed:", e)
+            import traceback
+            print("❌ PWM INIT FAILED")
+            traceback.print_exc()
             self.pwm = None
-
-    def _apply_pwm(self, throttle, steering):
-        if self.pwm is None:
-            return
 
         throttle = int(max(0, min(4095, throttle)))
         steering = int(max(0, min(4095, steering)))
