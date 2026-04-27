@@ -157,6 +157,10 @@ def index():
 
 <style>
 
+html, body {
+    touch-action: manipulation;
+}
+
 body {
     font-family: Arial, sans-serif;
     text-align: center;
@@ -278,11 +282,27 @@ Sign: <span id="sign"></span>
 </div>
 
 <script>
-
-// ✅ Disable double tap zoom
-document.addEventListener('dblclick', function(e){
+// ✅ Disable pinch zoom
+document.addEventListener('gesturestart', function (e) {
     e.preventDefault();
 });
+
+// ✅ Disable double tap zoom
+let lastTouchEnd = 0;
+document.addEventListener('touchend', function (event) {
+    const now = (new Date()).getTime();
+    if (now - lastTouchEnd <= 300) {
+        event.preventDefault();
+    }
+    lastTouchEnd = now;
+}, false);
+
+// ✅ Prevent ctrl + wheel zoom (desktop)
+document.addEventListener('wheel', function(e){
+    if(e.ctrlKey){
+        e.preventDefault();
+    }
+}, { passive: false });
 
 function sendKey(key){
     fetch('/manual', {
@@ -302,19 +322,34 @@ function updateSpeed(value){
 }
 
 function enableAutopilot(){
+
     fetch('/autopilot', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({enabled:true})
     });
+
+    autoBtn.classList.remove("inactive", "active-manual");
+    autoBtn.classList.add("active-auto");
+
+    manualBtn.classList.remove("active-manual", "active-auto");
+    manualBtn.classList.add("inactive");
 }
 
+
 function enableManual(){
+
     fetch('/autopilot', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({enabled:false})
     });
+
+    manualBtn.classList.remove("inactive", "active-auto");
+    manualBtn.classList.add("active-manual");
+
+    autoBtn.classList.remove("active-auto", "active-manual");
+    autoBtn.classList.add("inactive");
 }
 
 function calibrateLine(){
