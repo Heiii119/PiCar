@@ -138,6 +138,7 @@ class RobotController:
 
         elif key == "stop":
             self.throttle = THROTTLE_STOPPED
+             self.steering = STEERING_CENTER
 
         self._clamp_manual()
         self._apply_pwm(self.throttle, self.steering)
