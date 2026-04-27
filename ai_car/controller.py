@@ -6,12 +6,11 @@ import time
 # =========================
 PCA9685_ADDR = 0x40
 PCA9685_FREQ = 60
-I2C_BUS = 1
-DRIVER_PREFER = "smbus2"
 
 THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
 
+# ✅ YOUR TUNED VALUES
 THROTTLE_FORWARD = 410
 THROTTLE_SLOW = 400
 THROTTLE_STOPPED = 393
@@ -25,7 +24,6 @@ START_THROTTLE_TICKS = THROTTLE_STOPPED
 START_STEERING_TICKS = STEERING_CENTER
 
 STOP_ON_EXIT = True
-
 STEERING_STEP = 25
 
 # =========================
@@ -36,6 +34,7 @@ MODE_SLOW   = "SLOW"
 MODE_STOP   = "STOP"
 MODE_UTURN  = "UTURN"
 MODE_GO     = "GO"
+
 
 # =========================
 # ROBOT CONTROLLER
@@ -52,64 +51,69 @@ class RobotController:
         self.throttle = START_THROTTLE_TICKS
         self.steering = START_STEERING_TICKS
 
-        # ✅ Manual speed from slider
-        self.manual_speed_pwm = 410
+        # Manual slider speed
+        self.manual_speed_pwm = THROTTLE_FORWARD
 
-        # ---- Control parameters ----
+        # Control parameters
         self.deadband = 10
-        self.max_offset = 160
 
-        # ---- Reverse / Uturn timers ----
+        # Uturn timers
         self.mode_timer = 0.0
         self.uturn_stage = 0
 
-        # ---- Setup PWM driver ----
+        # Setup PWM driver
         self.pwm = None
         self._init_pwm()
 
         self._apply_pwm(self.throttle, self.steering)
 
     # =========================
-    # PWM INIT
+    # PWM INIT (LEGACY DRIVER)
     # =========================
     def _init_pwm(self):
         try:
-            from smbus2 import SMBus
-            from adafruit_pca9685 import PCA9685
-        
-            bus = SMBus(1)  # I2C bus 1
-            self.pwm = PCA9685(bus, address=0x40)
-            self.pwm.frequency = PCA9685_FREQ
-        
-            print("✅ PCA9685 initialized (SMBus mode)")
-        
+            import Adafruit_PCA9685
+
+            self.pwm = Adafruit_PCA9685.PCA9685(address=PCA9685_ADDR)
+            self.pwm.set_pwm_freq(PCA9685_FREQ)
+
+            print("✅ PCA9685 initialized (Legacy driver)")
+
         except Exception as e:
             import traceback
             print("❌ PWM INIT FAILED")
             traceback.print_exc()
             self.pwm = None
 
+    # =========================
+    # APPLY PWM (12-bit)
+    # =========================
+    def _apply_pwm(self, throttle, steering):
+
+        if self.pwm is None:
+            return
+
         throttle = int(max(0, min(4095, throttle)))
         steering = int(max(0, min(4095, steering)))
 
-        self.pwm.channels[THROTTLE_CHANNEL].duty_cycle = throttle
-        self.pwm.channels[STEERING_CHANNEL].duty_cycle = steering
+        # Legacy driver uses raw 12-bit ticks
+        self.pwm.set_pwm(THROTTLE_CHANNEL, 0, throttle)
+        self.pwm.set_pwm(STEERING_CHANNEL, 0, steering)
 
     # =========================
-    # SET MANUAL SPEED (Slider)
+    # SET MANUAL SPEED
     # =========================
     def set_manual_speed(self, pwm):
         self.manual_speed_pwm = int(pwm)
 
     # =========================
-    # MAIN UPDATE
+    # MAIN UPDATE (Autopilot)
     # =========================
     def update(self, offset, sign_label=None, confidence=0.0):
 
         if self.autopilot_enabled:
             self._apply_sign_mode(sign_label)
             self._compute_and_drive_discrete(offset)
-        # Manual mode does nothing here
 
     # =========================
     # MANUAL CONTROL
@@ -119,7 +123,6 @@ class RobotController:
         self.autopilot_enabled = False
 
         if key == "up":
-            # ✅ Use slider speed
             self.throttle = self.manual_speed_pwm
 
         elif key == "down":
@@ -153,6 +156,8 @@ class RobotController:
         if label is None:
             return
 
+        label = label.lower()
+
         if label == "stop":
             self.current_mode = MODE_STOP
             self.mode_timer = time.time()
@@ -160,7 +165,7 @@ class RobotController:
         elif label == "slow":
             self.current_mode = MODE_SLOW
 
-        elif label == "Uturn":
+        elif label == "uturn":
             self.current_mode = MODE_UTURN
             self.mode_timer = time.time()
             self.uturn_stage = 0
@@ -175,21 +180,21 @@ class RobotController:
 
         now = time.time()
 
-        # ---- STOP MODE ----
+        # STOP MODE
         if self.current_mode == MODE_STOP:
             self.throttle = THROTTLE_STOPPED
             if now - self.mode_timer > 2.0:
                 self.current_mode = MODE_LINE
 
-        # ---- SLOW MODE ----
+        # SLOW MODE
         elif self.current_mode == MODE_SLOW:
             self.throttle = THROTTLE_SLOW
 
-        # ---- GO MODE ----
+        # GO MODE
         elif self.current_mode == MODE_GO:
             self.throttle = THROTTLE_FORWARD
 
-        # ---- UTURN MODE ----
+        # UTURN MODE
         elif self.current_mode == MODE_UTURN:
 
             if self.uturn_stage == 0:
@@ -202,16 +207,13 @@ class RobotController:
                 self.throttle = THROTTLE_REVERSE
                 self.steering = STEERING_MAX
                 if now - self.mode_timer > 2.0:
-                    self.uturn_stage = 2
+                    self.current_mode = MODE_LINE
 
-            elif self.uturn_stage == 2:
-                self.current_mode = MODE_LINE
-
-        # ---- NORMAL LINE MODE ----
+        # NORMAL LINE MODE
         else:
             self.throttle = THROTTLE_FORWARD
 
-        # ---- Steering ----
+        # Steering logic
         if abs(offset) < self.deadband:
             self.steering = STEERING_CENTER
         elif offset > 0:
@@ -234,5 +236,3 @@ class RobotController:
     def shutdown(self):
         if STOP_ON_EXIT:
             self.stop()
-        if self.pwm:
-            self.pwm.deinit()
