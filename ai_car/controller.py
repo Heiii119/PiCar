@@ -20,9 +20,6 @@ STEERING_MIN = 280
 STEERING_MAX = 480
 STEERING_CENTER = 380
 
-START_THROTTLE_TICKS = THROTTLE_STOPPED
-START_STEERING_TICKS = STEERING_CENTER
-
 STOP_ON_EXIT = True
 STEERING_STEP = 25
 
@@ -44,12 +41,12 @@ class RobotController:
     def __init__(self):
 
         # ---- Mode ----
-        self.autopilot_enabled = True
+        self.autopilot_enabled = False
         self.current_mode = MODE_LINE
 
         # ---- PWM State ----
-        self.throttle = START_THROTTLE_TICKS
-        self.steering = START_STEERING_TICKS
+        self.throttle = THROTTLE_STOPPED
+        self.steering = STEERING_CENTER
 
         # Manual slider speed
         self.manual_speed_pwm = THROTTLE_FORWARD
@@ -109,7 +106,7 @@ class RobotController:
     # SET MANUAL SPEED
     # =========================
     def set_manual_speed(self, pwm):
-        self.manual_speed_pwm = int(pwm)
+        self.manual_speed_pwm = int(max(THROTTLE_REVERSE, min(THROTTLE_FORWARD, pwm)))
 
     # =========================
     # MAIN UPDATE (Autopilot)
@@ -128,7 +125,7 @@ class RobotController:
         self.autopilot_enabled = False
 
         if key == "up":
-            self.throttle = self.manual_speed_pwm
+            self.throttle = int(self.manual_speed_pwm)
 
         elif key == "down":
             self.throttle = THROTTLE_REVERSE
