@@ -19,10 +19,10 @@ class LineDetector:
 
         # ----- HSV Distance Settings -----
         self.target_hsv = None
-        self.hsv_distance_threshold = 40
+        self.hsv_distance_threshold = 70
 
         # ----- BGR Red Dominance Settings -----
-        self.red_margin = 40
+        self.red_margin = 70
 
         # ----- Calibration -----
         self.offset_bias = 0
