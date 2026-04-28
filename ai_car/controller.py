@@ -53,7 +53,7 @@ class RobotController:
 
         # ✅ LINE LOST PROTECTION
         self.line_lost_timer = None
-        self.line_lost_timeout = 3.0   # seconds
+        self.line_lost_timeout = 10.0   # seconds
 
         # PWM
         self.pwm = None
