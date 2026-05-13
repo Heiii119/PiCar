@@ -6,6 +6,10 @@ from flask import Flask, Response, jsonify, request
 def create_app(state, controller, line_detector):
     app = Flask(__name__)
 
+    # ✅ Force manual mode on startup
+    controller.autopilot_enabled = False
+    controller.current_mode = "manual"
+
     # =========================
     # VIDEO STREAM
     # =========================
@@ -61,8 +65,10 @@ def create_app(state, controller, line_detector):
         enabled = request.json.get("enabled", True)
         if enabled:
             controller.enable_autopilot()
+            controller.current_mode = "autopilot"
         else:
             controller.autopilot_enabled = False
+            controller.current_mode = "manual"
         return jsonify({"ok": True})
 
     @app.route("/calibrate_line", methods=["POST"])
@@ -88,6 +94,7 @@ def create_app(state, controller, line_detector):
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Autonomous Car Control</title>
+
 <style>
 body {
     font-family: Arial, sans-serif;
@@ -161,6 +168,7 @@ input[type=range] {
 }
 </style>
 </head>
+
 <body>
 
 <h1>🚗 Autonomous Car Control</h1>
@@ -173,8 +181,8 @@ Sign: <span id="sign"></span>
 </div>
 
 <div class="mode-container">
-    <button id="autoBtn" class="mode-btn active-auto" onclick="enableAutopilot()">Autopilot</button>
-    <button id="manualBtn" class="mode-btn" onclick="enableManual()">Manual</button>
+    <button id="autoBtn" class="mode-btn">Autopilot</button>
+    <button id="manualBtn" class="mode-btn active-manual">Manual</button>
 </div>
 
 <div class="arrow-grid">
@@ -194,61 +202,80 @@ Sign: <span id="sign"></span>
 <button class="stop-btn" onclick="sendKey('stop')">EMERGENCY STOP</button>
 
 <h3>Manual Speed (PWM)</h3>
-<input type="range" min="370" max="420" value="410" oninput="updateSpeed(this.value)">
+<input type="range" min="370" max="420" value="410" id="speedSlider">
 <div>PWM: <span id="speedValue">410</span></div>
 
 <button class="calibrate-btn" onclick="calibrateLine()">Calibrate Line</button>
 
 <script>
-function sendKey(key){
-    fetch('/manual', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({key:key})
-    });
-}
+window.onload = function() {
 
-function updateSpeed(value){
-    document.getElementById("speedValue").innerText = value;
-    fetch('/manual_speed', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({pwm:value})
-    });
-}
+const autoBtn = document.getElementById("autoBtn");
+const manualBtn = document.getElementById("manualBtn");
+const speedSlider = document.getElementById("speedSlider");
 
-function enableAutopilot(){
+autoBtn.onclick = function() {
     fetch('/autopilot', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({enabled:true})
     });
-}
+};
 
-function enableManual(){
+manualBtn.onclick = function() {
     fetch('/autopilot', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({enabled:false})
     });
-}
+};
 
-function calibrateLine(){
+speedSlider.oninput = function() {
+    document.getElementById("speedValue").innerText = this.value;
+    fetch('/manual_speed', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({pwm:this.value})
+    });
+};
+
+window.sendKey = function(key){
+    fetch('/manual', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({key:key})
+    });
+};
+
+window.calibrateLine = function(){
     fetch('/calibrate_line', { method:'POST' });
-}
+};
 
 async function updateStatus(){
     const res = await fetch('/status');
     const data = await res.json();
+
     document.getElementById('mode').textContent = data.mode;
     document.getElementById('auto').textContent = data.autopilot;
     document.getElementById('sign').textContent = data.sign;
+
+    // ✅ Auto highlight buttons based on real state
+    if (data.autopilot) {
+        autoBtn.classList.add("active-auto");
+        manualBtn.classList.remove("active-manual");
+    } else {
+        manualBtn.classList.add("active-manual");
+        autoBtn.classList.remove("active-auto");
+    }
 }
+
 setInterval(updateStatus, 500);
+updateStatus();
+
+};
 </script>
 
 </body>
 </html>
 """
-
     return app
