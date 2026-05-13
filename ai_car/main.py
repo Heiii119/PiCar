@@ -45,7 +45,7 @@ line_detector = LineDetector()
 line_detector.set_mode("hsv_distance")
 
 sign_detector = SignDetector("model.onnx")
-
+# ✅ FORCE manual mode on startup
 controller = RobotController()
 controller.autopilot_enabled = False
 
