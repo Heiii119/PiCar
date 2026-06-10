@@ -11,6 +11,8 @@ sudo apt upgrade -y
 echo "======================================"
 echo "Installing system dependencies..."
 echo "======================================"
+# Note: removed python3-opencv (we use pip opencv-python for version-matching).
+# These libs are runtime deps that pip opencv/onnxruntime link against.
 sudo apt install -y \
     python3-venv \
     python3-pip \
@@ -23,7 +25,6 @@ sudo apt install -y \
     libtiff6 \
     libopenblas-dev \
     libatlas3-base \
-    python3-opencv \
     i2c-tools
 
 echo "======================================"
@@ -32,29 +33,10 @@ echo "======================================"
 sudo raspi-config nonint do_i2c 0
 
 echo "======================================"
-echo "Adding Coral repository..."
-echo "======================================"
-
-# Add Coral GPG key
-curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-| sudo gpg --dearmor -o /usr/share/keyrings/coral-archive-keyring.gpg
-
-# Add Coral repo
-echo "deb [signed-by=/usr/share/keyrings/coral-archive-keyring.gpg] https://packages.cloud.google.com/apt coral-edgetpu-stable main" \
-| sudo tee /etc/apt/sources.list.d/coral-edgetpu.list
-
-sudo apt update
-
-echo "======================================"
-echo "Installing Coral Edge TPU runtime..."
-echo "======================================"
-sudo apt install -y libedgetpu1-max
-
-echo "======================================"
 echo "Creating virtual environment: car-venv"
 echo "======================================"
-
-python3 -m venv car-venv --system-site-packages
+# Isolated venv (no --system-site-packages) so OpenCV/NumPy stay version-matched.
+python3 -m venv car-venv
 source car-venv/bin/activate
 
 echo "======================================"
@@ -65,32 +47,50 @@ pip install --upgrade pip setuptools wheel
 echo "======================================"
 echo "Installing Python packages..."
 echo "======================================"
-
+# AI inference stack (matches your ONNX-based sign_detection.py)
 pip install \
     numpy==1.26.4 \
-    tflite-runtime \
+    opencv-python \
+    onnxruntime \
+    onnx
+
+# Hardware: Adafruit Blinka + PCA9685 motor/servo HAT
+pip install \
     Adafruit-Blinka \
-    adafruit-circuitpython-busdevice \
-    adafruit-circuitpython-connectionmanager \
     adafruit-circuitpython-pca9685 \
+    adafruit-circuitpython-motor \
+    adafruit-circuitpython-motorkit \
+    adafruit-circuitpython-servokit \
+    adafruit-circuitpython-busdevice \
     adafruit-circuitpython-register \
-    adafruit-circuitpython-requests \
-    adafruit-circuitpython-typing \
-    Adafruit_GPIO \
-    Adafruit_PCA9685 \
     Adafruit-PlatformDetect \
-    Adafruit-PureIO \
-    ultralytics \
+    Adafruit-PureIO
+
+# Web interface (matches web_interface.py)
+pip install \
     flask \
     flask-socketio \
     eventlet
+
+echo "======================================"
+echo "Verifying installation..."
+echo "======================================"
+python -c "import cv2, onnxruntime, numpy, board, busio, flask; \
+print('OpenCV :', cv2.__version__); \
+print('ONNXRT :', onnxruntime.__version__); \
+print('NumPy  :', numpy.__version__); \
+print('Blinka : OK (board, busio imported)'); \
+print('Flask  :', flask.__version__)"
 
 echo "======================================"
 echo "✅ Installation Complete"
 echo "======================================"
 echo ""
 echo "Activate environment with:"
-echo "source car-venv/bin/activate"
+echo "  source car-venv/bin/activate"
 echo ""
-echo "Reboot recommended."
+echo "Check the HAT is on the I2C bus with:"
+echo "  i2cdetect -y 1   (expect 0x40 for PCA9685)"
+echo ""
+echo "Reboot recommended (I2C enable)."
 echo "======================================"
