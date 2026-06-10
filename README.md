@@ -21,6 +21,11 @@ ssh pi@[ip_address]
 ```
 password=123345678
 
+## Object detection model : teachable machine
+### 1) get project / add sample
+### 2) train the model
+### 3) export
+
 ## Object detection model : best_int8_edgetpu.tflite
 Python 3.11
 Torch 2.2.2
