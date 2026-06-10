@@ -2,114 +2,111 @@
 import os
 import cv2
 import numpy as np
-import onnxruntime as ort
+from tflite_runtime.interpreter import Interpreter
 
 
 class SignDetector:
 
     def __init__(self,
-                 model_path="model.onnx",
+                 model_path="model.tflite",
+                 labels_path="labels.txt",
                  conf_threshold=0.75):
 
         self.model_path = model_path
+        self.labels_path = labels_path
         self.conf_threshold = conf_threshold
 
-        self.session = None
-        self.input_name = None
-        self.input_layout = None   # "NHWC" or "NCHW"
+        self.interpreter = None
+        self.input_index = None
+        self.output_index = None
+        self.in_h = 224
+        self.in_w = 224
+        self.class_names = []
 
-        # MUST match training order exactly
-        self.class_names = [
-            "background",
-            "stop",
-            "person",
-            "slow",
-            "Uturn",
-            "go"
-        ]
-
+        self._load_labels()
         self._load_model()
 
     # ======================================================
-    # LOAD ONNX MODEL
+    # LOAD LABELS  (Teachable Machine: "0 name" per line)
+    # ======================================================
+    def _load_labels(self):
+        if not os.path.exists(self.labels_path):
+            print("❌ SignDetector: labels.txt not found")
+            return
+
+        with open(self.labels_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # split off the leading index: "0 stop" -> "stop"
+                parts = line.split(" ", 1)
+                name = parts[1] if len(parts) == 2 else parts[0]
+                self.class_names.append(name)
+
+        print(f"✅ SignDetector: {len(self.class_names)} labels "
+              f"-> {self.class_names}")
+
+    # ======================================================
+    # LOAD TFLITE MODEL
     # ======================================================
     def _load_model(self):
-
         if not os.path.exists(self.model_path):
-            print("❌ SignDetector: ONNX model not found")
+            print("❌ SignDetector: model.tflite not found")
             return
 
         try:
-            self.session = ort.InferenceSession(
-                self.model_path,
-                providers=["CPUExecutionProvider"]
-            )
+            self.interpreter = Interpreter(model_path=self.model_path)
+            self.interpreter.allocate_tensors()
 
-            inp = self.session.get_inputs()[0]
-            self.input_name = inp.name
-            shape = inp.shape   # e.g. [1,224,224,3] or [1,3,224,224]
+            inp = self.interpreter.get_input_details()[0]
+            out = self.interpreter.get_output_details()[0]
 
-            # Auto-detect layout: if dim[1]==3 it's NCHW, else NHWC
-            if len(shape) == 4 and shape[1] == 3:
-                self.input_layout = "NCHW"
-            else:
-                self.input_layout = "NHWC"
+            self.input_index = inp["index"]
+            self.output_index = out["index"]
 
-            print(f"✅ SignDetector: ONNX loaded | input={shape} "
-                  f"| layout={self.input_layout}")
+            # input shape is [1, H, W, 3] for Teachable Machine
+            self.in_h = inp["shape"][1]
+            self.in_w = inp["shape"][2]
+
+            print(f"✅ SignDetector: TFLite loaded | input={inp['shape']} "
+                  f"| dtype={inp['dtype']}")
 
         except Exception as e:
             print("❌ SignDetector: Failed to load model:", e)
-            self.session = None
-
-    # ======================================================
-    # SOFTMAX (safe for both logits and probabilities)
-    # ======================================================
-    @staticmethod
-    def _softmax(x):
-        e = np.exp(x - np.max(x))
-        return e / e.sum()
+            self.interpreter = None
 
     # ======================================================
     # SIGN DETECTION
     # ======================================================
     def detect(self, frame):
         """
-        Returns:
-            label (str or None)
-            confidence (float)
+        Returns: (label or None, confidence float)
         """
-        if self.session is None:
+        if self.interpreter is None or not self.class_names:
             return None, 0.0
 
         try:
-            # 1) Resize
-            img = cv2.resize(frame, (224, 224))
+            # 1) Resize to model input size
+            img = cv2.resize(frame, (self.in_w, self.in_h))
 
-            # 2) BGR -> RGB  (TF/Keras models train on RGB)
+            # 2) BGR -> RGB  (Teachable Machine trains on RGB)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-            # 3) Normalize to 0..1
-            img = img.astype(np.float32) / 255.0
+            # 3) Normalize to -1..1  (Teachable Machine standard!)
+            img = (img.astype(np.float32) / 127.5) - 1.0
 
-            # 4) Arrange to the layout the model actually expects
-            if self.input_layout == "NCHW":
-                # HWC -> CHW
-                img = np.transpose(img, (2, 0, 1))
-
-            # 5) Add batch dimension
+            # 4) Add batch dim -> [1, H, W, 3]  (NHWC, no transpose)
             blob = np.expand_dims(img, axis=0)
 
-            # 6) Inference
-            output = self.session.run(
-                None, {self.input_name: blob}
-            )[0][0]
+            # 5) Inference
+            self.interpreter.set_tensor(self.input_index, blob)
+            self.interpreter.invoke()
+            output = self.interpreter.get_tensor(self.output_index)[0]
 
-            # 7) Normalize to probabilities (handles logits AND softmax)
-            probs = self._softmax(output)
-
-            class_id = int(np.argmax(probs))
-            confidence = float(probs[class_id])
+            # Teachable Machine output is ALREADY softmax probabilities
+            class_id = int(np.argmax(output))
+            confidence = float(output[class_id])
             label = self.class_names[class_id]
 
             if confidence < self.conf_threshold:
