@@ -199,7 +199,22 @@ if there is any detection error:
 3.	```sudo apt full-upgrade -y```
 4.	```rpicam-hello --list-cameras```
 
+# Google Coral USB accelerator 
+```bash
+echo "======================================"
+echo "Adding Coral repository..."
+echo "======================================"
 
+# Add Coral GPG key
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+| sudo gpg --dearmor -o /usr/share/keyrings/coral-archive-keyring.gpg
+
+# Add Coral repo
+echo "deb [signed-by=/usr/share/keyrings/coral-archive-keyring.gpg] https://packages.cloud.google.com/apt coral-edgetpu-stable main" \
+| sudo tee /etc/apt/sources.list.d/coral-edgetpu.list
+
+sudo apt update
+```
 
 # Camera Programs and usage
 ```bash
